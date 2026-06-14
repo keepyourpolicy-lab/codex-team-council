@@ -1,8 +1,41 @@
 # Codex Team Council
 
-Codex Team Council packages the `/team` skill as a portable Codex plugin. It runs multiple model CLIs as independent floor workers, preserves their full outputs, creates recall capsules, sends the synthesis back for adversarial review, and returns one fortified answer with loud red flags for any missing model.
+Codex Team Council packages the `/team` skill as a portable Codex plugin for higher-intelligence analysis inside Codex.
 
-The plugin does not include provider credentials. Each user configures their own local roster and secrets.
+It exists because hard software work often fails in the gaps between models: one model misses a file-level constraint, another makes an elegant but unproven assumption, another sees the real edge case but buries it in prose. Team Council turns that into a repeatable method instead of a vibes-based "ask a few models" workflow.
+
+The core idea is simple: every council member solves the whole problem independently, then the system preserves, critiques, and recombines their work into one stronger answer.
+
+## Council Layers
+
+1. Source-of-truth declaration: lock the council onto the live repo, worktree, commit, or artifact that actually matters.
+2. SOT-only context pack: give every worker the same mission, rules, and evidence, while preventing accidental research in the wrong checkout.
+3. Parallel floor workers: send the full task to every enabled model. No role splitting. Each model is responsible for the whole answer.
+4. Raw artifacts: preserve each full worker output as the authority for later inspection.
+5. Recall capsules: use non-council archivist passes to preserve claims, caveats, proof paths, minority insights, contradictions, red flags, and implementation details without making workers write rigid schemas.
+6. First synthesis: dedupe and denoise the reports while preserving disagreements and one-model insights.
+7. Adversarial second pass: send the synthesis and peer knowledge back to the original workers, preferably in the same persistent session, and ask them to attack assumptions, verify minority claims, and revise.
+8. Final synthesis: produce one fortified report with what survived critique, what collapsed, what remains uncertain, and what Codex should verify before implementation.
+9. Failure propagation: if any model fails because of auth, funds, limits, CLI errors, or local issues, the process continues and carries a loud `RED FLAG:` to the final answer.
+
+## Why It Exists
+
+This is not a committee for more opinions. It is a methodology for reducing blind spots:
+
+- independent full attempts instead of model-specific task slicing
+- evidence and proof paths instead of confident prose
+- raw artifacts as authority instead of lossy summaries
+- recall capsules to move knowledge between stages without throwing away minority insights
+- adversarial review to fight the usual LLM failure mode of assuming its own first answer is right
+- final Codex verification before implementation or live operations
+
+## Early Uplift Evidence
+
+In an early real debugging test, a separate worker reviewed the council's output against work it had already done. The headline architecture recommendation was not new; it validated what the worker had already suspected. The uplift came from the council correcting a wrong hypothesis and improving the action order.
+
+Specifically, the council identified that a transferred lead was failing because of the actual access rule, not just bad test data. That turned a vague suspicion into a concrete production bug and changed the next fix. It also reframed availability as a first-order product decision and promoted a previously minor “topbar footgun” into a competing ownership problem.
+
+That is the kind of intelligence increase this project is trying to make routine: not magic, not consensus worship, but a system that catches wrong assumptions, preserves the one weird useful insight, and returns a better implementation path than any one first pass.
 
 ## What Is Included
 
@@ -47,7 +80,7 @@ Then edit `~/.codex/team/roster.json` for your machine:
 - set `enabled: false` for models you do not want to spend on
 - add new models by adding roster entries
 
-## Secrets
+## Local Credential Setup
 
 Do not put literal API keys in this repo.
 

@@ -1,7 +1,7 @@
 {
   "name": "codex-team-council",
   "version": "0.1.0",
-  "description": "Portable multi-model council skill for Codex with SOT guardrails, adversarial review, recall capsules, and failure red flags.",
+  "description": "Portable Codex plugin for higher-intelligence multi-model council analysis: independent full attempts, SOT guardrails, recall capsules, synthesis, adversarial critique, and final implementation guidance.",
   "author": {
     "name": "Team Council contributors"
   },
@@ -18,8 +18,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Team Council",
-    "shortDescription": "Run a multi-model adversarial council from Codex.",
-    "longDescription": "Codex Team Council packages the /team skill and local runner for independent multi-model analysis, knowledge-preserving synthesis, adversarial second passes, and loud failure red flags.",
+    "shortDescription": "Turn several model CLIs into one adversarial council.",
+    "longDescription": "Codex Team Council exists to raise the quality of hard Codex work by making multiple models solve the same problem independently, preserving their raw reasoning, compressing it into recall capsules, synthesizing the overlap and minority insights, sending that synthesis back for adversarial critique, and returning one fortified answer with proof paths, uncertainty, red flags, and next implementation guidance. In early real-world debugging tests, the council produced practical intelligence uplift by correcting a worker's wrong root-cause hypothesis and reprioritizing the next action.",
     "developerName": "Team Council contributors",
     "category": "Productivity",
     "capabilities": [
