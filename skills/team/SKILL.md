@@ -104,6 +104,16 @@ The runner uses this skill's bundled `references/roster.example.json` unless a u
 
 To add Qwen, GLM, Gemini, or any new model, add a roster entry with an adapter, command path, model id, and `enabled: true`. To stop spending tokens on a model, set `enabled: false` or invoke the runner with `--exclude <model id>`.
 
+Default routing is:
+
+- `deepseek-v4-pro`: `adapter: "opencode"`, `binary: "opencode"`, `model: "deepseek/deepseek-v4-pro"`. The DeepSeek key/provider setup belongs in opencode's normal configuration; the default worker does not read `DEEPSEEK_API_KEY` directly.
+- `kimi-k2-7`: `adapter: "claude"`, `binary: "claude"`, `model: "kimi-for-coding"`, with `ANTHROPIC_BASE_URL=https://api.kimi.com/coding/`. Provide `KIMI_API_KEY`; the runner maps it to `ANTHROPIC_API_KEY` only for the spawned Claude CLI process.
+- `opus-4-8-max`: `adapter: "claude"`, `binary: "claude"`, `model: "opus"`, `effort: "max"`. This requires Claude Code / Claude CLI installed and authenticated.
+- `gpt-5-5-xhigh`: `adapter: "codex"`, `binary: "codex"`, `model: "gpt-5.5"`, `reasoning_effort: "xhigh"`, `service_tier: "fast"`. This requires Codex CLI installed and authenticated.
+- `codex-synthesizer`: final synthesis uses the Codex CLI with `model: "gpt-5.5"`, `reasoning_effort: "xhigh"`, and `service_tier: "fast"`.
+
+The worker ids are local roster labels, not a guarantee that a provider uses the same public product name.
+
 Kimi can run two ways:
 
 - Preferred: `adapter: "claude"` pointed at Kimi Code's Anthropic-compatible endpoint with `ANTHROPIC_BASE_URL=https://api.kimi.com/coding/`, `model: "kimi-for-coding"`, and `CLAUDE_CODE_SUBAGENT_MODEL=kimi-for-coding`.

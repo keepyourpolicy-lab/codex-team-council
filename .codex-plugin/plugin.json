@@ -1,6 +1,6 @@
 {
   "name": "codex-team-council",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260614182510",
   "description": "Portable Codex plugin for higher-intelligence multi-model council analysis: independent full attempts, SOT guardrails, recall capsules, synthesis, adversarial critique, and final implementation guidance.",
   "author": {
     "name": "Team Council contributors"
