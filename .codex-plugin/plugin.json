@@ -1,0 +1,37 @@
+{
+  "name": "codex-team-council",
+  "version": "0.1.0",
+  "description": "Portable multi-model council skill for Codex with SOT guardrails, adversarial review, recall capsules, and failure red flags.",
+  "author": {
+    "name": "Team Council contributors"
+  },
+  "homepage": "https://github.com/keepyourpolicy-lab/codex-team-council",
+  "repository": "https://github.com/keepyourpolicy-lab/codex-team-council",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "skill",
+    "multi-model",
+    "council",
+    "adversarial-review"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Team Council",
+    "shortDescription": "Run a multi-model adversarial council from Codex.",
+    "longDescription": "Codex Team Council packages the /team skill and local runner for independent multi-model analysis, knowledge-preserving synthesis, adversarial second passes, and loud failure red flags.",
+    "developerName": "Team Council contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "/team Review this architecture decision.",
+      "/team Analyze this bug and risk.",
+      "/team Find the smallest reliable fix."
+    ],
+    "brandColor": "#0F766E",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/logo.png"
+  }
+}

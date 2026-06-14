@@ -1,0 +1,4 @@
+interface:
+  display_name: "Team Council"
+  short_description: "Run a multi-model adversarial council"
+  default_prompt: "Use $team to run a multi-model council on this bug."

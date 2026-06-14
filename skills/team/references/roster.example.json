@@ -1,0 +1,75 @@
+{
+  "run": {
+    "work_dir": "sot",
+    "max_output_chars": 240000,
+    "second_pass": true,
+    "synthesis": true,
+    "knowledge_transfer": {
+      "capsules": true,
+      "capsule_model_id": "deepseek-v4-pro",
+      "allow_archivist_outside_selected": false,
+      "capsule_input_max_chars": 160000,
+      "capsule_chunk_overlap_chars": 2000,
+      "capsule_max_output_chars": 90000,
+      "pack_raw_excerpt_chars": 70000,
+      "pack_max_chars": 320000,
+      "route_peer_knowledge_to_round2": true,
+      "route_round_knowledge_to_final": true
+    }
+  },
+  "models": [
+    {
+      "id": "deepseek-v4-pro",
+      "enabled": true,
+      "adapter": "opencode",
+      "binary": "opencode",
+      "model": "deepseek/deepseek-v4-pro"
+    },
+    {
+      "id": "kimi-k2-7",
+      "enabled": true,
+      "adapter": "claude",
+      "binary": "claude",
+      "model": "kimi-for-coding",
+      "effort": "max",
+      "api_key_env": "KIMI_API_KEY",
+      "api_key_target_env": "ANTHROPIC_API_KEY",
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding/",
+        "ANTHROPIC_MODEL": "kimi-for-coding",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "kimi-for-coding",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-for-coding",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "kimi-for-coding",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "kimi-for-coding",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "262144"
+      },
+      "tools": "Read,Grep,Glob,LS,Agent"
+    },
+    {
+      "id": "opus-4-8-max",
+      "enabled": true,
+      "adapter": "claude",
+      "binary": "claude",
+      "model": "opus",
+      "effort": "max",
+      "tools": "Read,Grep,Glob,LS,Agent"
+    },
+    {
+      "id": "gpt-5-5-xhigh",
+      "enabled": true,
+      "adapter": "codex",
+      "binary": "codex",
+      "model": "gpt-5.5",
+      "reasoning_effort": "xhigh",
+      "service_tier": "fast"
+    }
+  ],
+  "synthesizer": {
+    "id": "codex-synthesizer",
+    "adapter": "codex",
+    "binary": "codex",
+    "model": "gpt-5.5",
+    "reasoning_effort": "xhigh",
+    "service_tier": "fast"
+  }
+}
