@@ -35,6 +35,12 @@ In an early real debugging test, a separate worker reviewed the council's output
 
 Specifically, the council identified that a transferred lead was failing because of the actual access rule, not just bad test data. That turned a vague suspicion into a concrete production bug and changed the next fix. It also reframed availability as a first-order product decision and promoted a previously minor “topbar footgun” into a competing ownership problem.
 
+In later field use, the maintainer used Team Council on five hard debugging and architecture problems where GPT 5.5 xhigh and Opus 4.8 Max alone had not solved the issue cleanly, were unsure, or missed important aspects. This is not a benchmark and is not presented as scientific evidence. It is the project's current personal field signal: it worked for us, and the improvement was real and obvious in the work. The repeated pattern was not that the council produced more prose. It found the missing mechanism, preserved a minority objection, or ranked the fix path before the work degraded into guess-looping trial and error.
+
+Since implementation, those five uses produced complete one-shot diagnosis or fix paths for every item tried. That is all the evidence the project claims at this stage.
+
+That field signal is why this plugin treats intelligence as a process discipline: independent attempts, source-of-truth checks, adversarial humility, minority-insight preservation, and final verification. The goal is a final answer that behaves less like a transcript of several models and more like a higher-order review pass.
+
 That is the kind of intelligence increase this project is trying to make routine: not magic, not consensus worship, but a system that catches wrong assumptions, preserves the one weird useful insight, and returns a better implementation path than any one first pass.
 
 ## What Is Included
