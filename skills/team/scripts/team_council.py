@@ -7,6 +7,7 @@ import argparse
 import concurrent.futures
 import contextlib
 import datetime as dt
+import fcntl
 import json
 import os
 import re
@@ -22,16 +23,6 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows fallback
-    fcntl = None  # type: ignore[assignment]
-
-try:
-    import msvcrt
-except ImportError:  # pragma: no cover - POSIX fallback
-    msvcrt = None  # type: ignore[assignment]
-
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = SKILL_DIR / "references" / "roster.example.json"
@@ -39,6 +30,8 @@ USER_CONFIG = Path.home() / ".codex" / "team" / "roster.json"
 DEFAULT_RUN_ROOT = Path("/tmp/team-council-runs")
 OPENCODE_LOCK_PATH = Path("/tmp/team-council-opencode.lock")
 OPENCODE_THREAD_LOCK = threading.Lock()
+TEAM_STATUS_LOCK = threading.Lock()
+DEFAULT_TRANSIENT_RETRY_DELAYS_SECONDS = [30, 90, 180]
 DEFAULT_KNOWLEDGE_TRANSFER = {
     "capsules": True,
     "capsule_model_id": "deepseek-v4-pro",
@@ -74,6 +67,16 @@ SECRET_PATTERNS = [
     re.compile(r"\b(sk-[A-Za-z0-9_-]{16,})\b"),
     re.compile(r"\b([A-Za-z0-9_=-]{32,}\.[A-Za-z0-9_=-]{16,}\.[A-Za-z0-9_=-]{16,})\b"),
 ]
+
+TRANSIENT_ERROR_RE = re.compile(
+    r"(?i)\b(529|502|503|504|temporarily overloaded|service unavailable|gateway timeout|bad gateway|try again later|upstream error|overloaded)\b"
+)
+QUOTA_OR_RATE_RE = re.compile(
+    r"(?i)\b(429|rate[_ -]?limit|usage limit|session limit|quota|insufficient funds|billing|credits exhausted|too many requests)\b"
+)
+AUTH_OR_PERMISSION_RE = re.compile(
+    r"(?i)\b(unauthorized|forbidden|invalid api key|permission denied|permission requested|auto-rejecting|not authenticated|login required)\b"
+)
 
 
 def redact(text: str) -> str:
@@ -125,30 +128,169 @@ def run_cmd(
     )
 
 
+def utc_timestamp() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def emit_event(run_dir: Path, event: str, message: str, **payload: Any) -> Dict[str, Any]:
+    record = {
+        "timestamp": utc_timestamp(),
+        "event": event,
+        "message": message,
+        **payload,
+    }
+    redacted_line = redact(json.dumps(record, sort_keys=True))
+    with TEAM_STATUS_LOCK:
+        (run_dir / "events.jsonl").parent.mkdir(parents=True, exist_ok=True)
+        with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(redacted_line + "\n")
+        write_json(run_dir / "latest_event.json", record)
+    print(f"TEAM_STATUS {event}: {redact(message)}", file=sys.stderr, flush=True)
+    return record
+
+
+def json_payload(text: str) -> Optional[Dict[str, Any]]:
+    try:
+        payload = json.loads(text or "{}")
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def completed_process_indicates_failure(proc: subprocess.CompletedProcess[str]) -> bool:
+    if proc.returncode != 0:
+        return True
+    payload = json_payload(proc.stdout or "")
+    if not payload:
+        return False
+    if payload.get("is_error") or payload.get("api_error_status") or payload.get("error"):
+        return True
+    subtype = str(payload.get("subtype") or "")
+    return "error" in subtype.lower()
+
+
+def string_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+def disallowed_model_usage(payload: Dict[str, Any], patterns: Any) -> List[str]:
+    configured = string_list(patterns)
+    usage = payload.get("modelUsage")
+    if not configured or not isinstance(usage, dict):
+        return []
+    disallowed: List[str] = []
+    for model_name in usage.keys():
+        name = str(model_name)
+        for pattern in configured:
+            try:
+                matched = re.search(pattern, name, re.IGNORECASE) is not None
+            except re.error:
+                matched = pattern.lower() in name.lower()
+            if matched:
+                disallowed.append(name)
+                break
+    return disallowed
+
+
+def classify_failure_text(text: str) -> str:
+    lowered = text.lower()
+    if "no final assistant" in lowered or "no final answer" in lowered:
+        return "no_final_answer"
+    if "disallowed model route" in lowered or "provider usage included disallowed" in lowered:
+        return "model_routing_error"
+    if QUOTA_OR_RATE_RE.search(text):
+        return "quota_or_rate_limit"
+    if AUTH_OR_PERMISSION_RE.search(text):
+        return "auth_or_permission"
+    if TRANSIENT_ERROR_RE.search(text):
+        return "transient_provider_error"
+    if "runner exception" in lowered:
+        return "runner_exception"
+    return "error"
+
+
+def classify_process_failure(proc: subprocess.CompletedProcess[str], reason: str = "") -> str:
+    text = "\n".join(part for part in [reason, proc.stderr or "", proc.stdout or ""] if part)
+    return classify_failure_text(text)
+
+
+def retry_delays_for_model(model: Dict[str, Any]) -> List[int]:
+    configured = model.get("transient_retry_delays_seconds")
+    if configured is None:
+        delays = list(DEFAULT_TRANSIENT_RETRY_DELAYS_SECONDS)
+    elif isinstance(configured, list):
+        delays = [int(item) for item in configured]
+    else:
+        delays = [int(part.strip()) for part in str(configured).split(",") if part.strip()]
+    max_retries = int(model.get("transient_retries", len(delays)))
+    return delays[:max(0, max_retries)]
+
+
+def run_with_transient_retries(
+    *,
+    run_dir: Path,
+    model_id: str,
+    round_name: str,
+    model: Dict[str, Any],
+    command: List[str],
+    runner: Any,
+) -> Tuple[subprocess.CompletedProcess[str], List[Dict[str, Any]]]:
+    delays = retry_delays_for_model(model)
+    retry_events: List[Dict[str, Any]] = []
+    attempt = 1
+    while True:
+        proc = runner()
+        if not completed_process_indicates_failure(proc):
+            return proc, retry_events
+
+        reason = compact_failure_reason(proc)
+        failure_kind = classify_process_failure(proc, reason)
+        if failure_kind != "transient_provider_error" or attempt > len(delays):
+            return proc, retry_events
+
+        delay = delays[attempt - 1]
+        message = (
+            f"{round_name}/{model_id} hit transient provider error; "
+            f"retry {attempt}/{len(delays)} in {delay}s: {reason}"
+        )
+        retry_events.append(
+            {
+                "attempt": attempt,
+                "delay_seconds": delay,
+                "reason": reason,
+                "failure_kind": failure_kind,
+                "command_preview": command_preview(command),
+            }
+        )
+        emit_event(
+            run_dir,
+            "worker_retry",
+            message,
+            model_id=model_id,
+            round=round_name,
+            attempt=attempt,
+            delay_seconds=delay,
+            reason=reason,
+            failure_kind=failure_kind,
+            command_preview=command_preview(command),
+        )
+        time.sleep(delay)
+        attempt += 1
+
+
 @contextlib.contextmanager
 def file_lock(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as handle:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            return
-        if msvcrt is not None:
-            if handle.tell() == 0:
-                handle.write("\0")
-                handle.flush()
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            return
-        yield
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @contextlib.contextmanager
@@ -746,7 +888,23 @@ def parse_json_error(text: str) -> str:
 def base_worker_prompt(mission: str, sot: Dict[str, Any], context_files: List[Tuple[str, str]], preflight_red_flags: List[str]) -> str:
     context_sections = []
     for label, content in context_files:
-        context_sections.append(f"## Context File: {label}\n\n{content}")
+        label_path = Path(label).expanduser()
+        try:
+            label_resolved = label_path.resolve()
+            sot_resolved = Path(str(sot.get("git_root") or sot.get("sot_path") or ".")).resolve()
+            in_sot = label_resolved.is_relative_to(sot_resolved)
+        except Exception:
+            in_sot = False
+        if in_sot:
+            heading = f"## Context File In SOT: {label}"
+            provenance = "This file path is inside the declared SOT and may be read again if needed."
+        else:
+            heading = "## Inline Context Attachment"
+            provenance = (
+                f"Original source path for provenance only: {label}\n"
+                "The content is copied inline below. Do not try to read this path with tools; it may be outside the SOT sandbox."
+            )
+        context_sections.append(f"{heading}\n\n{provenance}\n\n{content}")
     context_blob = "\n\n".join(context_sections) if context_sections else "No extra context files were attached."
     forbidden = "\n".join(f"- {item}" for item in sot["forbidden_worktrees"]) or "- none detected"
     status = sot.get("status_short") or "clean or unavailable"
@@ -1063,12 +1221,40 @@ class Adapter:
         session_id: Optional[str],
         command: List[str],
         reason_override: Optional[str] = None,
+        retry_events: Optional[List[Dict[str, Any]]] = None,
+        failure_kind_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         elapsed = time.time() - started
         folder = self.run_dir / round_name / self.id
         write_text(folder / "stdout.txt", proc.stdout or "")
         write_text(folder / "stderr.txt", proc.stderr or "")
         write_text(folder / "output.md", output)
+        ok = proc.returncode == 0 and bool(output.strip())
+        if ok:
+            reason = ""
+            failure_kind = ""
+        elif reason_override:
+            reason = reason_override
+            failure_kind = failure_kind_override or classify_process_failure(proc, reason)
+        elif proc.returncode == 0:
+            reason = "exit 0; empty output"
+            failure_kind = "no_final_answer"
+        else:
+            reason = compact_failure_reason(proc)
+            failure_kind = failure_kind_override or classify_process_failure(proc, reason)
+        result = {
+            "id": self.id,
+            "ok": ok,
+            "reason": reason,
+            "failure_kind": failure_kind,
+            "output": truncate_output(output, self.max_output_chars),
+            "artifact_path": str(folder / "output.md"),
+            "full_output_chars": len(output),
+            "session_id": session_id,
+            "elapsed_seconds": elapsed,
+            "round": round_name,
+            "retry_events": retry_events or [],
+        }
         meta = {
             "id": self.id,
             "round": round_name,
@@ -1078,28 +1264,13 @@ class Adapter:
             "elapsed_seconds": round(elapsed, 3),
             "session_id": session_id,
             "command_preview": command_preview(command),
-        }
-        write_json(folder / "meta.json", meta)
-        ok = proc.returncode == 0 and bool(output.strip())
-        if ok:
-            reason = ""
-        elif reason_override:
-            reason = reason_override
-        elif proc.returncode == 0:
-            reason = "exit 0; empty output"
-        else:
-            reason = compact_failure_reason(proc)
-        return {
-            "id": self.id,
             "ok": ok,
             "reason": reason,
-            "output": truncate_output(output, self.max_output_chars),
-            "artifact_path": str(folder / "output.md"),
-            "full_output_chars": len(output),
-            "session_id": session_id,
-            "elapsed_seconds": elapsed,
-            "round": round_name,
+            "failure_kind": failure_kind,
+            "retry_events": retry_events or [],
         }
+        write_json(folder / "meta.json", meta)
+        return result
 
 
 class OpenCodeAdapter(Adapter):
@@ -1123,20 +1294,53 @@ class OpenCodeAdapter(Adapter):
         if session_id:
             args.extend(["--session", session_id])
         started = time.time()
-        proc = run_opencode_cmd(args, cwd=Path(self.model.get("work_dir", "/tmp")), input_text=prompt)
+        proc, retry_events = run_with_transient_retries(
+            run_dir=self.run_dir,
+            model_id=self.id,
+            round_name=round_name,
+            model=self.model,
+            command=args,
+            runner=lambda: run_opencode_cmd(args, cwd=Path(self.model.get("work_dir", "/tmp")), input_text=prompt),
+        )
         texts: List[str] = []
+        json_events = 0
+        tool_events = 0
         seen_session = session_id
         for line in (proc.stdout or "").splitlines():
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            json_events += 1
             seen_session = seen_session or event.get("sessionID")
             part = event.get("part") or {}
             if part.get("type") == "text":
                 texts.append(str(part.get("text", "")))
-        output = "\n".join(texts).strip() or (proc.stdout or "").strip()
-        return self._record(round_name, proc, output, started, seen_session, args)
+            if part.get("type") == "tool" or event.get("type") == "tool_use":
+                tool_events += 1
+        output = "\n".join(texts).strip()
+        reason_override = None
+        failure_kind_override = None
+        if not output:
+            if proc.returncode == 0 and json_events:
+                reason_override = (
+                    f"OpenCode produced {json_events} JSON event(s)"
+                    f" including {tool_events} tool event(s), but no final assistant text"
+                )
+                failure_kind_override = "no_final_answer"
+            else:
+                output = (proc.stdout or "").strip()
+        return self._record(
+            round_name,
+            proc,
+            output,
+            started,
+            seen_session,
+            args,
+            reason_override=reason_override,
+            retry_events=retry_events,
+            failure_kind_override=failure_kind_override,
+        )
 
 
 class KimiOpenAIAdapter(Adapter):
@@ -1314,7 +1518,14 @@ class KimiAdapter(Adapter):
             args.extend(["--skills-dir", str(skills_dir)])
         args.extend(["-m", str(self.model["model"]), "-p", prompt, "--output-format", "stream-json"])
         started = time.time()
-        proc = run_cmd(args, cwd=Path(self.model.get("work_dir", "/tmp")), env=process_env)
+        proc, retry_events = run_with_transient_retries(
+            run_dir=self.run_dir,
+            model_id=self.id,
+            round_name=round_name,
+            model=self.model,
+            command=args,
+            runner=lambda: run_cmd(args, cwd=Path(self.model.get("work_dir", "/tmp")), env=process_env),
+        )
         output_parts: List[str] = []
         seen_session = session_id
         saw_tool_activity = False
@@ -1343,7 +1554,16 @@ class KimiAdapter(Adapter):
         reason_override = compact_failure_reason(proc) if proc.returncode != 0 else None
         if proc.returncode == 0 and not output and saw_tool_activity:
             reason_override = "Kimi produced tool calls/tool results but no final assistant content"
-        return self._record(round_name, proc, output, started, seen_session, args, reason_override=reason_override)
+        return self._record(
+            round_name,
+            proc,
+            output,
+            started,
+            seen_session,
+            args,
+            reason_override=reason_override,
+            retry_events=retry_events,
+        )
 
 
 class ClaudeAdapter(Adapter):
@@ -1381,22 +1601,50 @@ class ClaudeAdapter(Adapter):
         except Exception as exc:
             return failure_result(self, round_name, f"environment setup failed: {exc}")
         started = time.time()
-        proc = run_cmd(
-            args,
-            cwd=Path(self.model.get("work_dir", "/tmp")),
-            input_text=prompt,
-            env=process_env,
+        proc, retry_events = run_with_transient_retries(
+            run_dir=self.run_dir,
+            model_id=self.id,
+            round_name=round_name,
+            model=self.model,
+            command=args,
+            runner=lambda: run_cmd(
+                args,
+                cwd=Path(self.model.get("work_dir", "/tmp")),
+                input_text=prompt,
+                env=process_env,
+            ),
         )
         output = ""
         seen_session = session_id
+        parsed_payload: Optional[Dict[str, Any]] = None
         try:
-            payload = json.loads(proc.stdout or "{}")
-            output = str(payload.get("result") or payload.get("message") or "")
-            seen_session = seen_session or payload.get("session_id") or payload.get("sessionId")
+            parsed_payload = json.loads(proc.stdout or "{}")
+            output = str(parsed_payload.get("result") or parsed_payload.get("message") or "")
+            seen_session = seen_session or parsed_payload.get("session_id") or parsed_payload.get("sessionId")
         except json.JSONDecodeError:
             output = (proc.stdout or "").strip()
-        reason_override = compact_failure_reason(proc) if proc.returncode != 0 else None
-        return self._record(round_name, proc, output, started, seen_session, args, reason_override=reason_override)
+        if parsed_payload and (parsed_payload.get("is_error") or parsed_payload.get("api_error_status")) and proc.returncode == 0:
+            proc = subprocess.CompletedProcess(proc.args, 1, stdout=proc.stdout, stderr=proc.stderr)
+        usage_violation = None
+        if parsed_payload:
+            disallowed = disallowed_model_usage(parsed_payload, self.model.get("disallow_model_usage_patterns"))
+            if disallowed:
+                usage_violation = "provider usage included disallowed model route(s): " + ", ".join(sorted(set(disallowed)))
+                stderr = "\n".join(part for part in [proc.stderr or "", usage_violation] if part)
+                proc = subprocess.CompletedProcess(proc.args, 1, stdout=proc.stdout, stderr=stderr)
+        reason_override = usage_violation or (compact_failure_reason(proc) if proc.returncode != 0 else None)
+        failure_kind_override = "model_routing_error" if usage_violation else None
+        return self._record(
+            round_name,
+            proc,
+            output,
+            started,
+            seen_session,
+            args,
+            reason_override=reason_override,
+            retry_events=retry_events,
+            failure_kind_override=failure_kind_override,
+        )
 
 
 class CodexAdapter(Adapter):
@@ -1440,7 +1688,14 @@ class CodexAdapter(Adapter):
                 "-",
             ]
         started = time.time()
-        proc = run_cmd(args, cwd=Path(self.model.get("work_dir", "/tmp")), input_text=prompt)
+        proc, retry_events = run_with_transient_retries(
+            run_dir=self.run_dir,
+            model_id=self.id,
+            round_name=round_name,
+            model=self.model,
+            command=args,
+            runner=lambda: run_cmd(args, cwd=Path(self.model.get("work_dir", "/tmp")), input_text=prompt),
+        )
         output = last_message.read_text(encoding="utf-8").strip() if last_message.exists() else (proc.stdout or "").strip()
         seen_session = session_id
         for line in (proc.stdout or "").splitlines():
@@ -1451,7 +1706,7 @@ class CodexAdapter(Adapter):
             if event.get("thread_id"):
                 seen_session = str(event["thread_id"])
                 break
-        return self._record(round_name, proc, output, started, seen_session, args)
+        return self._record(round_name, proc, output, started, seen_session, args, retry_events=retry_events)
 
 
 ADAPTERS = {
@@ -1481,12 +1736,14 @@ def failure_result(adapter: Adapter, round_name: str, reason: str) -> Dict[str, 
         "id": adapter.id,
         "ok": False,
         "reason": reason,
+        "failure_kind": classify_failure_text(reason),
         "output": "",
         "artifact_path": str(folder / "output.md"),
         "full_output_chars": 0,
         "session_id": None,
         "elapsed_seconds": 0,
         "round": round_name,
+        "retry_events": [],
     }
 
 
@@ -1751,20 +2008,96 @@ def generate_capsules(
     return capsules
 
 
+def public_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": result.get("id"),
+        "ok": bool(result.get("ok")),
+        "reason": result.get("reason", ""),
+        "failure_kind": result.get("failure_kind", ""),
+        "elapsed_seconds": round(float(result.get("elapsed_seconds") or 0), 3),
+        "artifact_path": result.get("artifact_path"),
+        "retry_count": len(result.get("retry_events") or []),
+    }
+
+
+def write_status(
+    run_dir: Path,
+    phase: str,
+    *,
+    selected_models: Optional[List[str]] = None,
+    round1: Optional[List[Dict[str, Any]]] = None,
+    round2: Optional[List[Dict[str, Any]]] = None,
+    red_flags: Optional[List[str]] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    failed = [public_result(item) for item in [*(round1 or []), *(round2 or [])] if not item.get("ok")]
+    status = {
+        "updated_at": utc_timestamp(),
+        "phase": phase,
+        "run_dir": str(run_dir),
+        "selected_models": selected_models or [],
+        "round1": [public_result(item) for item in (round1 or [])],
+        "round2": [public_result(item) for item in (round2 or [])],
+        "failed": failed,
+        "red_flags": red_flags or [],
+        "events_file": str(run_dir / "events.jsonl"),
+        "latest_event_file": str(run_dir / "latest_event.json"),
+    }
+    if extra:
+        status.update(extra)
+    write_json(run_dir / "status.json", status)
+
+
 def run_parallel(adapters: List[Adapter], prompt_by_id: Dict[str, str], round_name: str, session_by_id: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(adapters))) as pool:
         future_map = {}
         for adapter in adapters:
             session_id = (session_by_id or {}).get(adapter.id)
+            emit_event(
+                adapter.run_dir,
+                "worker_started",
+                f"{round_name}/{adapter.id} started",
+                model_id=adapter.id,
+                round=round_name,
+                adapter=adapter.model.get("adapter"),
+                model=adapter.model.get("model"),
+                persistent_session=bool(session_id),
+            )
             future = pool.submit(adapter.run, prompt_by_id[adapter.id], round_name, session_id)
             future_map[future] = adapter.id
         for future in concurrent.futures.as_completed(future_map):
+            model_id = future_map[future]
             try:
-                results.append(future.result())
+                result = future.result()
             except Exception as exc:
-                model_id = future_map[future]
-                results.append({"id": model_id, "ok": False, "reason": f"runner exception: {exc}", "output": "", "session_id": None, "round": round_name})
+                result = {
+                    "id": model_id,
+                    "ok": False,
+                    "reason": f"runner exception: {exc}",
+                    "failure_kind": "runner_exception",
+                    "output": "",
+                    "session_id": None,
+                    "round": round_name,
+                    "retry_events": [],
+                }
+            results.append(result)
+            if result.get("ok"):
+                emit_event(
+                    adapters[0].run_dir,
+                    "worker_ok",
+                    f"{round_name}/{model_id} completed",
+                    **public_result(result),
+                    round=round_name,
+                )
+            else:
+                emit_event(
+                    adapters[0].run_dir,
+                    "worker_failed",
+                    f"{round_name}/{model_id} failed ({result.get('failure_kind') or 'error'}): {result.get('reason') or 'unknown error'}",
+                    **public_result(result),
+                    round=round_name,
+                )
     return sorted(results, key=lambda item: item["id"])
 
 
@@ -1784,7 +2117,8 @@ def red_flags_from_results(results: List[Dict[str, Any]], disabled: List[Tuple[s
     flags.extend(f"RED FLAG: {model_id} did not participate because {reason}." for model_id, reason in disabled)
     for result in results:
         if not result.get("ok"):
-            flags.append(f"RED FLAG: {result['id']} did not participate because {result.get('reason') or 'unknown error'}.")
+            kind = result.get("failure_kind") or classify_failure_text(str(result.get("reason") or ""))
+            flags.append(f"RED FLAG: {result['id']} did not participate because [{kind}] {result.get('reason') or 'unknown error'}.")
     return flags
 
 
@@ -1922,22 +2256,38 @@ def main() -> int:
 
     adapters = [make_adapter(model, run_dir, max_output_chars) for model in selected_models]
     prompt_by_id = {adapter.id: worker_prompt for adapter in adapters}
+    selected_model_ids = [adapter.id for adapter in adapters]
+    emit_event(
+        run_dir,
+        "run_started",
+        f"/team council started with {len(selected_model_ids)} model(s)",
+        selected_models=selected_model_ids,
+        disabled=disabled,
+        sot=sot,
+    )
+    write_status(run_dir, "started", selected_models=selected_model_ids, red_flags=preflight_red_flags)
 
     if args.dry_run:
         summary = {
             "run_dir": str(run_dir),
             "dry_run": True,
-            "selected_models": [adapter.id for adapter in adapters],
+            "selected_models": selected_model_ids,
             "disabled": disabled,
             "red_flags": preflight_red_flags,
             "sot": sot,
+            "status": str(run_dir / "status.json"),
+            "events": str(run_dir / "events.jsonl"),
         }
+        write_status(run_dir, "dry_run_complete", selected_models=selected_model_ids, red_flags=preflight_red_flags)
         write_json(run_dir / "summary.json", summary)
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
 
+    emit_event(run_dir, "phase_started", "round1 workers started", phase="round1")
+    write_status(run_dir, "round1_running", selected_models=selected_model_ids, red_flags=preflight_red_flags)
     round1 = run_parallel(adapters, prompt_by_id, "round1")
     red_flags = red_flags_from_results(round1, disabled, preflight_red_flags)
+    write_status(run_dir, "round1_complete", selected_models=selected_model_ids, round1=round1, red_flags=red_flags)
     round1_capsules = generate_capsules(archivist_config, round1, mission, run_dir, "round1", kt_settings) if capsules_active else {}
     for model_id, capsule in round1_capsules.items():
         if not capsule.get("ok"):
@@ -1951,6 +2301,8 @@ def main() -> int:
         round1_synthesis = fallback_round1(round1, red_flags)
     else:
         try:
+            emit_event(run_dir, "phase_started", "round1 synthesis started", phase="round1_synthesis")
+            write_status(run_dir, "round1_synthesis_running", selected_models=selected_model_ids, round1=round1, red_flags=red_flags)
             synth_adapter = make_adapter({**synthesizer_config, "id": str(synthesizer_config.get("id", "synthesizer"))}, run_dir, max_output_chars)
             synth_prompt = synthesis_round1_prompt(mission, sot, round1, red_flags, round1_knowledge_pack)
             synth_result = synth_adapter.run(synth_prompt, "synthesis/round1")
@@ -1963,6 +2315,7 @@ def main() -> int:
             red_flags.append(f"RED FLAG: synthesizer did not participate because runner exception: {exc}.")
             round1_synthesis = fallback_round1(round1, red_flags)
     write_text(run_dir / "synthesis" / "round1_synthesis.md", round1_synthesis)
+    write_status(run_dir, "round1_synthesis_complete", selected_models=selected_model_ids, round1=round1, red_flags=red_flags)
 
     round2: List[Dict[str, Any]] = []
     second_pass_enabled = bool(run_settings.get("second_pass", True)) and not args.skip_second_pass
@@ -1999,10 +2352,16 @@ def main() -> int:
                 red_flags,
                 persistent=persistent,
             )
+        emit_event(run_dir, "phase_started", "round2 adversarial workers started", phase="round2")
+        write_status(run_dir, "round2_running", selected_models=selected_model_ids, round1=round1, red_flags=red_flags)
         round2 = run_parallel(round2_adapters, round2_prompts, "round2", session_by_id=session_by_id)
         for result in round2:
             if not result.get("ok"):
-                red_flags.append(f"RED FLAG: {result['id']} did not complete adversarial pass because {result.get('reason') or 'unknown error'}.")
+                kind = result.get("failure_kind") or classify_failure_text(str(result.get("reason") or ""))
+                red_flags.append(
+                    f"RED FLAG: {result['id']} did not complete adversarial pass because [{kind}] {result.get('reason') or 'unknown error'}."
+                )
+        write_status(run_dir, "round2_complete", selected_models=selected_model_ids, round1=round1, round2=round2, red_flags=red_flags)
 
     round2_capsules: Dict[str, Dict[str, Any]] = {}
     if round2 and capsules_active:
@@ -2022,6 +2381,8 @@ def main() -> int:
         final_report = fallback_final(round1_synthesis, round2, red_flags, run_dir)
     else:
         try:
+            emit_event(run_dir, "phase_started", "final synthesis started", phase="final_synthesis")
+            write_status(run_dir, "final_synthesis_running", selected_models=selected_model_ids, round1=round1, round2=round2, red_flags=red_flags)
             final_adapter = make_adapter({**synthesizer_config, "id": str(synthesizer_config.get("id", "synthesizer-final"))}, run_dir, max_output_chars)
             final_prompt = final_synthesis_prompt(
                 mission,
@@ -2044,16 +2405,31 @@ def main() -> int:
             final_report = fallback_final(round1_synthesis, round2, red_flags, run_dir)
     final_report = append_missing_red_flags(final_report, red_flags)
     write_text(run_dir / "synthesis" / "final_report.md", final_report)
+    write_status(run_dir, "complete", selected_models=selected_model_ids, round1=round1, round2=round2, red_flags=red_flags)
+    emit_event(
+        run_dir,
+        "run_complete",
+        f"/team council complete with {len(red_flags)} red flag(s)",
+        red_flag_count=len(red_flags),
+        final_report=str(run_dir / "synthesis" / "final_report.md"),
+    )
 
     summary = {
         "run_dir": str(run_dir),
-        "selected_models": [adapter.id for adapter in adapters],
-        "round1": [{"id": item["id"], "ok": item["ok"], "reason": item.get("reason", "")} for item in round1],
-        "round2": [{"id": item["id"], "ok": item["ok"], "reason": item.get("reason", "")} for item in round2],
-        "round1_capsules": [{"id": item["id"], "ok": item["ok"], "reason": item.get("reason", "")} for item in round1_capsules.values()],
-        "round2_capsules": [{"id": item["id"], "ok": item["ok"], "reason": item.get("reason", "")} for item in round2_capsules.values()],
+        "selected_models": selected_model_ids,
+        "round1": [public_result(item) for item in round1],
+        "round2": [public_result(item) for item in round2],
+        "round1_capsules": [public_result(item) for item in round1_capsules.values()],
+        "round2_capsules": [public_result(item) for item in round2_capsules.values()],
         "red_flags": red_flags,
         "final_report": str(run_dir / "synthesis" / "final_report.md"),
+        "status": str(run_dir / "status.json"),
+        "events": str(run_dir / "events.jsonl"),
+        "health": {
+            "ok": not red_flags and all(item.get("ok") for item in round1) and all(item.get("ok") for item in round2),
+            "failed_models": [public_result(item) for item in [*round1, *round2] if not item.get("ok")],
+            "red_flag_count": len(red_flags),
+        },
     }
     write_json(run_dir / "summary.json", summary)
     print(json.dumps(summary, indent=2, sort_keys=True))

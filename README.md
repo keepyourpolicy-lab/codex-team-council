@@ -16,7 +16,8 @@ The core idea is simple: every council member solves the whole problem independe
 6. First synthesis: dedupe and denoise the reports while preserving disagreements and one-model insights.
 7. Adversarial second pass: send the synthesis and peer knowledge back to the original workers, preferably in the same persistent session, and ask them to attack assumptions, verify minority claims, run the smallest useful read-only SOT check for a consequential dispute, and revise.
 8. Final synthesis: produce one fortified report with what survived critique, what collapsed, what remains uncertain, and what Codex should verify before implementation, after auditing for dropped dissent, unsupported consensus, and emergent claims no worker actually made.
-9. Failure propagation: if any model fails because of auth, funds, limits, CLI errors, or local issues, the process continues and carries a loud `RED FLAG:` to the final answer.
+9. Failure propagation: if any model fails because of auth, funds, limits, CLI errors, local issues, or a provider returning no final answer, the process continues and carries a loud `RED FLAG:` to the final answer.
+10. Live run visibility: the runner writes `events.jsonl`, `latest_event.json`, and `status.json` as it goes, so the managing Codex window can see worker starts, retries, overloads, quota/session-limit failures, and no-final-answer failures without digging through raw artifacts.
 
 ## Why It Exists
 
@@ -53,6 +54,8 @@ That is the kind of intelligence increase this project is trying to make routine
 - `scripts/setup_roster.py`: local roster bootstrap
 - `scripts/package_zip.py`: clean zip packager
 - `scripts/self_check.py`: package validation
+
+Run artifacts include `events.jsonl`, `latest_event.json`, `status.json`, and `summary.json`. These expose failure categories and retry counts directly. A provider CLI that exits successfully but only emits tool/event logs without final assistant content is treated as a failed council participant, not as a valid answer.
 
 ## Install Locally
 
