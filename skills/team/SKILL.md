@@ -92,9 +92,13 @@ Default run artifacts are written under `/tmp/team-council-runs/<timestamp>/`:
 - `round2/<model>/capsule.md`: adversarial recall capsule when enabled
 - `knowledge/round1_knowledge_pack.md` and `knowledge/round2_knowledge_pack.md`: routed knowledge packs
 - `synthesis/final_report.md`: fortified final report
-- `summary.json`: machine-readable outcome and red flags
+- `events.jsonl`: live event stream with worker starts, retries, failures, and phase changes
+- `status.json` and `latest_event.json`: first-class machine-readable run health for the managing Codex window
+- `summary.json`: machine-readable outcome, failure categories, retry counts, artifact paths, and red flags
 
 Runs with no attached context files produce a red flag by default. Use `--allow-empty-context` only for prompts where no evidence pack is needed.
+
+The runner treats "tool/event stream but no final assistant text" as a worker failure, even if the provider CLI exits 0. Transient provider overloads such as 529/503/504 are retried with backoff before becoming red flags. Quota, rate/session limit, auth, permission, and no-final-answer failures are not retried; they are surfaced immediately with a failure category.
 
 ## Model Roster
 
@@ -125,7 +129,7 @@ Kimi can run three ways:
 
 For Kimi Open Platform keys, use the OpenAI-compatible direct API with `base_url: "https://api.moonshot.ai/v1"` and `model: "kimi-k2.7-code"`. Kimi K2.7 Code thinking is always on; do not pass a non-thinking mode. Preserve `reasoning_content` across resumed turns when using the direct adapter.
 
-GLM-5.2 Coding Plan should run through an officially supported coding-tool path, not a raw SDK call. Preferred setup is `adapter: "claude"` pointed at Z.ai's Anthropic-compatible endpoint with `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic`, `api_key_target_env: "ANTHROPIC_AUTH_TOKEN"`, `model: "opus"`, and Claude model mapping env values `ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2[1m]`, `ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2[1m]`, and `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`. Keep the Z.ai key in `ZAI_API_KEY` or `~/.codex/team/zai_api_key`. For council runs, default GLM to `safe_mode: true`, `effort: "high"`, and `tools: "Read,Grep,Glob,LS"`: this still maps to GLM thinking mode, but avoids the quota-heavy Claude project-context load and `max` + `Agent` runaway path observed in repo-wide audits. Raise GLM to `max` only for a deliberate one-off run.
+GLM-5.2 Coding Plan should run through an officially supported coding-tool path, not a raw SDK call. Preferred setup is `adapter: "claude"` pointed at Z.ai's Anthropic-compatible endpoint with `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic`, `api_key_target_env: "ANTHROPIC_AUTH_TOKEN"`, `model: "opus"`, and Claude model mapping env values `ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2[1m]`, `ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2[1m]`, `ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5.2[1m]`, and `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`. Keep the Z.ai key in `ZAI_API_KEY` or `~/.codex/team/zai_api_key`. For council runs, default GLM to `safe_mode: true`, `effort: "high"`, and `tools: "Read,Grep,Glob,LS"`: this still maps to GLM thinking mode, but avoids the quota-heavy Claude project-context load and `max` + `Agent` runaway path observed in repo-wide audits. Raise GLM to `max` only for a deliberate one-off run. Keep `recover_tool_protocol_error: true` for GLM: if the Claude-wrapper/Z.ai path ends with `stop_reason=tool_use` and no final answer, the runner resumes the same session with tools disabled and asks for the final answer from already gathered evidence. If Z.ai returns 529 or another transient overload, the runner retries with backoff and records the retry in `events.jsonl`/`status.json`; if provider usage reports an older GLM route matched by `disallow_model_usage_patterns`, the worker red-flags as a model-routing failure instead of being trusted.
 
 Keep provider credentials out of the plugin. Prefer provider CLI login or environment variables such as `KIMI_API_KEY` / `MOONSHOT_API_KEY`; if using `api_key_file`, keep that file outside this repo with `0600` permissions.
 

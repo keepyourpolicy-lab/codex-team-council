@@ -16,7 +16,8 @@ The core idea is simple: every council member solves the whole problem independe
 6. First synthesis: dedupe and denoise the reports while preserving disagreements and one-model insights.
 7. Adversarial second pass: send the synthesis and peer knowledge back to the original workers, preferably in the same persistent session, and ask them to attack assumptions, verify minority claims, run the smallest useful read-only SOT check for a consequential dispute, and revise.
 8. Final synthesis: produce one fortified report with what survived critique, what collapsed, what remains uncertain, and what Codex should verify before implementation, after auditing for dropped dissent, unsupported consensus, and emergent claims no worker actually made.
-9. Failure propagation: if any model fails because of auth, funds, limits, CLI errors, or local issues, the process continues and carries a loud `RED FLAG:` to the final answer.
+9. Failure propagation: if any model fails because of auth, funds, limits, CLI errors, local issues, or a provider returning no final answer, the process continues and carries a loud `RED FLAG:` to the final answer.
+10. Live run visibility: the runner writes `events.jsonl`, `latest_event.json`, and `status.json` as it goes, so the managing Codex window can see worker starts, retries, overloads, quota/session-limit failures, and no-final-answer failures without digging through raw artifacts.
 
 ## Why It Exists
 
@@ -35,6 +36,12 @@ In an early real debugging test, a separate worker reviewed the council's output
 
 Specifically, the council identified that a transferred lead was failing because of the actual access rule, not just bad test data. That turned a vague suspicion into a concrete production bug and changed the next fix. It also reframed availability as a first-order product decision and promoted a previously minor “topbar footgun” into a competing ownership problem.
 
+In later field use, the maintainer used Team Council on five hard debugging and architecture problems where GPT 5.5 xhigh and Opus 4.8 Max alone had not solved the issue cleanly, were unsure, or missed important aspects. This is not a benchmark and is not presented as scientific evidence. It is the project's current personal field signal: it worked for us, and the improvement was real and obvious in the work. The repeated pattern was not that the council produced more prose. It found the missing mechanism, preserved a minority objection, or ranked the fix path before the work degraded into guess-looping trial and error.
+
+Since implementation, those five uses produced complete one-shot diagnosis or fix paths for every item tried. That is all the evidence the project claims at this stage.
+
+That field signal is why this plugin treats intelligence as a process discipline: independent attempts, source-of-truth checks, adversarial humility, minority-insight preservation, and final verification. The goal is a final answer that behaves less like a transcript of several models and more like a higher-order review pass.
+
 That is the kind of intelligence increase this project is trying to make routine: not magic, not consensus worship, but a system that catches wrong assumptions, preserves the one weird useful insight, and returns a better implementation path than any one first pass.
 
 ## What Is Included
@@ -47,6 +54,8 @@ That is the kind of intelligence increase this project is trying to make routine
 - `scripts/setup_roster.py`: local roster bootstrap
 - `scripts/package_zip.py`: clean zip packager
 - `scripts/self_check.py`: package validation
+
+Run artifacts include `events.jsonl`, `latest_event.json`, `status.json`, and `summary.json`. These expose failure categories and retry counts directly. A provider CLI that exits successfully but only emits tool/event logs without final assistant content is treated as a failed council participant, not as a valid answer.
 
 ## Install Locally
 
