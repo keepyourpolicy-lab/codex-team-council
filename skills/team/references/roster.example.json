@@ -28,22 +28,34 @@
     {
       "id": "kimi-k2-7",
       "enabled": true,
+      "adapter": "kimi",
+      "binary": "kimi",
+      "model": "kimi-code/kimi-for-coding",
+      "council_mode": true,
+      "max_prompt_chars": 120000,
+      "round2_pack_raw_excerpt_chars": 0,
+      "round2_pack_max_chars": 60000
+    },
+    {
+      "id": "glm-5-2-max",
+      "enabled": false,
       "adapter": "claude",
       "binary": "claude",
-      "model": "kimi-for-coding",
-      "effort": "max",
-      "api_key_env": "KIMI_API_KEY",
-      "api_key_target_env": "ANTHROPIC_API_KEY",
+      "model": "opus",
+      "effort": "high",
+      "safe_mode": true,
+      "api_key_env": "ZAI_API_KEY",
+      "api_key_file": "~/.codex/team/zai_api_key",
+      "api_key_target_env": "ANTHROPIC_AUTH_TOKEN",
       "env": {
-        "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding/",
-        "ANTHROPIC_MODEL": "kimi-for-coding",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": "kimi-for-coding",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-for-coding",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "kimi-for-coding",
-        "CLAUDE_CODE_SUBAGENT_MODEL": "kimi-for-coding",
-        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "262144"
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2[1m]",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2[1m]",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
+        "API_TIMEOUT_MS": "3000000"
       },
-      "tools": "Read,Grep,Glob,LS,Agent"
+      "tools": "Read,Grep,Glob,LS"
     },
     {
       "id": "opus-4-8-max",

@@ -14,8 +14,8 @@ The core idea is simple: every council member solves the whole problem independe
 4. Raw artifacts: preserve each full worker output as the authority for later inspection.
 5. Recall capsules: use non-council archivist passes to preserve claims, caveats, proof paths, minority insights, contradictions, red flags, and implementation details without making workers write rigid schemas.
 6. First synthesis: dedupe and denoise the reports while preserving disagreements and one-model insights.
-7. Adversarial second pass: send the synthesis and peer knowledge back to the original workers, preferably in the same persistent session, and ask them to attack assumptions, verify minority claims, and revise.
-8. Final synthesis: produce one fortified report with what survived critique, what collapsed, what remains uncertain, and what Codex should verify before implementation.
+7. Adversarial second pass: send the synthesis and peer knowledge back to the original workers, preferably in the same persistent session, and ask them to attack assumptions, verify minority claims, run the smallest useful read-only SOT check for a consequential dispute, and revise.
+8. Final synthesis: produce one fortified report with what survived critique, what collapsed, what remains uncertain, and what Codex should verify before implementation, after auditing for dropped dissent, unsupported consensus, and emergent claims no worker actually made.
 9. Failure propagation: if any model fails because of auth, funds, limits, CLI errors, or local issues, the process continues and carries a loud `RED FLAG:` to the final answer.
 
 ## Why It Exists
@@ -79,6 +79,7 @@ Then edit `~/.codex/team/roster.json` for your machine:
 - set `binary` to commands on your `PATH` such as `opencode`, `claude`, or `codex`
 - set `enabled: false` for models you do not want to spend on
 - add new models by adding roster entries
+- keep native Kimi entries in `council_mode: true` so Kimi runs as one read-only council member, with subagents and mutation/web/bash tools denied and a native-CLI-safe second-pass peer pack
 
 ## Default Model Routing
 
@@ -87,7 +88,8 @@ The bundled roster is intentionally explicit about how each model is reached. Th
 Default workers:
 
 - `deepseek-v4-pro`: runs through the `opencode` CLI with model `deepseek/deepseek-v4-pro`. Install and authenticate `opencode`, then configure your DeepSeek provider/key in `opencode`'s normal provider config. This plugin does not read `DEEPSEEK_API_KEY` directly for the default DeepSeek worker.
-- `kimi-k2-7`: runs through the `claude` CLI pointed at Kimi Code's Anthropic-compatible endpoint, with model `kimi-for-coding`. Install `claude`, set `KIMI_API_KEY` locally, and the runner maps it to `ANTHROPIC_API_KEY` only for the child process while setting `ANTHROPIC_BASE_URL=https://api.kimi.com/coding/`.
+- `kimi-k2-7`: runs through the native `kimi` CLI with model `kimi-code/kimi-for-coding` and `council_mode: true`. Install and log in to Kimi Code CLI; the runner reuses local OAuth credentials while isolating Kimi in a per-run `KIMI_CODE_HOME` and denying subagents/mutation/web/bash tools.
+- `glm-5-2-max`: disabled by default. When enabled, it runs through the `claude` CLI against Z.ai's Anthropic-compatible endpoint, maps `ZAI_API_KEY` to `ANTHROPIC_AUTH_TOKEN`, uses `effort: "high"`, and limits tools to `Read,Grep,Glob,LS`.
 - `opus-4-8-max`: runs through the `claude` CLI with local worker id `opus-4-8-max`, model `opus`, and effort `max`. Install and log in to Claude Code / Claude CLI before enabling this worker.
 - `gpt-5-5-xhigh`: runs through the `codex` CLI with model `gpt-5.5`, reasoning effort `xhigh`, and service tier `fast`. Install and log in to the Codex CLI before enabling this worker.
 
