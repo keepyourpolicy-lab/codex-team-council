@@ -196,12 +196,32 @@ def disallowed_model_usage(payload: Dict[str, Any], patterns: Any) -> List[str]:
     return disallowed
 
 
+def payload_is_tool_protocol_error(payload: Optional[Dict[str, Any]]) -> bool:
+    if not payload or not payload.get("is_error"):
+        return False
+    stop_reason = str(payload.get("stop_reason") or "").lower()
+    terminal_reason = str(payload.get("terminal_reason") or "").lower()
+    subtype = str(payload.get("subtype") or "").lower()
+    errors = " ".join(str(item) for item in (payload.get("errors") or []))
+    text = " ".join([stop_reason, terminal_reason, subtype, errors]).lower()
+    return (
+        "tool_use" in text
+        and (
+            "aborted_streaming" in text
+            or "error_during_execution" in text
+            or "ede_diagnostic" in text
+        )
+    )
+
+
 def classify_failure_text(text: str) -> str:
     lowered = text.lower()
     if "no final assistant" in lowered or "no final answer" in lowered:
         return "no_final_answer"
     if "disallowed model route" in lowered or "provider usage included disallowed" in lowered:
         return "model_routing_error"
+    if "stop_reason=tool_use" in lowered or ("tool_use" in lowered and ("aborted_streaming" in lowered or "ede_diagnostic" in lowered)):
+        return "tool_protocol_error"
     if QUOTA_OR_RATE_RE.search(text):
         return "quota_or_rate_limit"
     if AUTH_OR_PERMISSION_RE.search(text):
@@ -1270,6 +1290,21 @@ class Adapter:
             "retry_events": retry_events or [],
         }
         write_json(folder / "meta.json", meta)
+        write_json(folder / "result.json", {key: value for key, value in result.items() if key != "output"})
+        emit_event(
+            self.run_dir,
+            "worker_result_recorded",
+            f"{round_name}/{self.id} recorded {'success' if ok else failure_kind or 'failure'}",
+            model_id=self.id,
+            id=self.id,
+            round=round_name,
+            ok=ok,
+            reason=reason,
+            failure_kind=failure_kind,
+            elapsed_seconds=round(elapsed, 3),
+            artifact_path=str(folder / "output.md"),
+            retry_count=len(retry_events or []),
+        )
         return result
 
 
@@ -1572,15 +1607,16 @@ class ClaudeAdapter(Adapter):
     def run(self, prompt: str, round_name: str, session_id: Optional[str] = None) -> Dict[str, Any]:
         binary = os.path.expanduser(str(self.model["binary"]))
         tools = self.model.get("tools", "Read,Grep,Glob,LS,Agent")
-        args = [
-            binary,
-        ]
-        if self.model.get("safe_mode", False):
-            args.append("--safe-mode")
-        if self.model.get("bare", False):
-            args.append("--bare")
-        args.extend(
-            [
+
+        def build_args(resume_session: Optional[str] = None, tools_override: Any = None) -> List[str]:
+            selected_tools = tools if tools_override is None else tools_override
+            built = [binary]
+            if self.model.get("safe_mode", False):
+                built.append("--safe-mode")
+            if self.model.get("bare", False):
+                built.append("--bare")
+            built.extend(
+                [
                 "-p",
                 "--model",
                 str(self.model["model"]),
@@ -1588,14 +1624,28 @@ class ClaudeAdapter(Adapter):
                 str(self.model.get("effort", "max")),
                 "--output-format",
                 "json",
-            ]
-        )
-        if self.model.get("no_chrome", True):
-            args.append("--no-chrome")
-        if tools is not None:
-            args.extend(["--tools", str(tools)])
-        if session_id:
-            args.extend(["-r", session_id])
+                ]
+            )
+            if self.model.get("no_chrome", True):
+                built.append("--no-chrome")
+            if selected_tools is not None:
+                built.extend(["--tools", str(selected_tools)])
+            if resume_session:
+                built.extend(["-r", resume_session])
+            return built
+
+        def parse_process(process: subprocess.CompletedProcess[str], fallback_session: Optional[str]) -> Tuple[str, Optional[str], Optional[Dict[str, Any]]]:
+            parsed: Optional[Dict[str, Any]] = None
+            seen = fallback_session
+            try:
+                parsed = json.loads(process.stdout or "{}")
+                parsed_output = str(parsed.get("result") or parsed.get("message") or "")
+                seen = seen or parsed.get("session_id") or parsed.get("sessionId")
+                return parsed_output, seen, parsed
+            except json.JSONDecodeError:
+                return (process.stdout or "").strip(), seen, None
+
+        args = build_args(session_id)
         try:
             process_env = build_process_env(self.model)
         except Exception as exc:
@@ -1614,15 +1664,71 @@ class ClaudeAdapter(Adapter):
                 env=process_env,
             ),
         )
-        output = ""
-        seen_session = session_id
-        parsed_payload: Optional[Dict[str, Any]] = None
-        try:
-            parsed_payload = json.loads(proc.stdout or "{}")
-            output = str(parsed_payload.get("result") or parsed_payload.get("message") or "")
-            seen_session = seen_session or parsed_payload.get("session_id") or parsed_payload.get("sessionId")
-        except json.JSONDecodeError:
-            output = (proc.stdout or "").strip()
+        output, seen_session, parsed_payload = parse_process(proc, session_id)
+        reason_override = None
+        failure_kind_override = None
+        if (
+            payload_is_tool_protocol_error(parsed_payload)
+            and self.model.get("recover_tool_protocol_error", False)
+            and seen_session
+        ):
+            original_reason = compact_failure_reason(proc)
+            folder = self.run_dir / round_name / self.id
+            write_text(folder / "tool_protocol_error_stdout.txt", proc.stdout or "")
+            write_text(folder / "tool_protocol_error_stderr.txt", proc.stderr or "")
+            recovery_args = build_args(str(seen_session), "")
+            recovery_prompt = block(
+                """
+                Your previous council turn ended with a tool call and no final assistant answer.
+                Do not call tools in this recovery turn. Produce the final council answer now from
+                the context, observations, and read-only evidence already gathered in this session.
+                If evidence is missing, say exactly what is missing instead of calling more tools.
+                """
+            )
+            emit_event(
+                self.run_dir,
+                "worker_recovery",
+                f"{round_name}/{self.id} hit tool protocol error; retrying same session with tools disabled",
+                model_id=self.id,
+                round=round_name,
+                failure_kind="tool_protocol_error",
+                reason=original_reason,
+                session_id=seen_session,
+                command_preview=command_preview(recovery_args),
+            )
+            retry_events.append(
+                {
+                    "attempt": "tool_protocol_recovery",
+                    "delay_seconds": 0,
+                    "reason": original_reason,
+                    "failure_kind": "tool_protocol_error",
+                    "command_preview": command_preview(recovery_args),
+                }
+            )
+            recovery_proc, recovery_retry_events = run_with_transient_retries(
+                run_dir=self.run_dir,
+                model_id=self.id,
+                round_name=round_name,
+                model=self.model,
+                command=recovery_args,
+                runner=lambda: run_cmd(
+                    recovery_args,
+                    cwd=Path(self.model.get("work_dir", "/tmp")),
+                    input_text=recovery_prompt,
+                    env=process_env,
+                ),
+            )
+            retry_events.extend(recovery_retry_events)
+            recovery_output, recovery_session, recovery_payload = parse_process(recovery_proc, seen_session)
+            if recovery_proc.returncode == 0 and recovery_output.strip() and not payload_is_tool_protocol_error(recovery_payload):
+                proc = recovery_proc
+                output = recovery_output
+                seen_session = recovery_session
+                parsed_payload = recovery_payload
+            else:
+                recovery_reason = compact_failure_reason(recovery_proc)
+                reason_override = f"tool protocol error: {original_reason}; recovery failed: {recovery_reason}"
+                failure_kind_override = "tool_protocol_error"
         if parsed_payload and (parsed_payload.get("is_error") or parsed_payload.get("api_error_status")) and proc.returncode == 0:
             proc = subprocess.CompletedProcess(proc.args, 1, stdout=proc.stdout, stderr=proc.stderr)
         usage_violation = None
@@ -1632,8 +1738,11 @@ class ClaudeAdapter(Adapter):
                 usage_violation = "provider usage included disallowed model route(s): " + ", ".join(sorted(set(disallowed)))
                 stderr = "\n".join(part for part in [proc.stderr or "", usage_violation] if part)
                 proc = subprocess.CompletedProcess(proc.args, 1, stdout=proc.stdout, stderr=stderr)
-        reason_override = usage_violation or (compact_failure_reason(proc) if proc.returncode != 0 else None)
-        failure_kind_override = "model_routing_error" if usage_violation else None
+        if usage_violation:
+            reason_override = usage_violation
+            failure_kind_override = "model_routing_error"
+        elif reason_override is None and proc.returncode != 0:
+            reason_override = compact_failure_reason(proc)
         return self._record(
             round_name,
             proc,
