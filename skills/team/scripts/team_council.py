@@ -51,6 +51,22 @@ DEFAULT_KNOWLEDGE_TRANSFER = {
     "route_peer_knowledge_to_round2": True,
     "route_round_knowledge_to_final": True,
 }
+KIMI_NATIVE_ARG_MAX_CHARS = 120000
+KIMI_COUNCIL_DENY_TOOLS = [
+    "Agent",
+    "AgentSwarm",
+    "Write",
+    "Edit",
+    "Bash",
+    "WebSearch",
+    "FetchURL",
+    "WriteFile",
+    "StrReplaceFile",
+    "Shell",
+    "SearchWeb",
+    "EnterPlanMode",
+    "ExitPlanMode",
+]
 
 
 SECRET_PATTERNS = [
@@ -241,14 +257,9 @@ def normalize_ids(raw: Optional[str]) -> Optional[set[str]]:
 
 def validate_binary(model: Dict[str, Any]) -> Optional[str]:
     if model.get("adapter") == "kimi-openai":
-        if model.get("api_key_env") and os.getenv(str(model["api_key_env"])):
+        if has_api_key_source(model):
             return None
-        if os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY"):
-            return None
-        key_file = model.get("api_key_file")
-        if key_file and Path(str(key_file)).expanduser().exists():
-            return None
-        return "missing Kimi API key env/file"
+        return "missing API key env/file"
     binary = model.get("binary")
     if not binary:
         return "missing binary path"
@@ -258,18 +269,15 @@ def validate_binary(model: Dict[str, Any]) -> Optional[str]:
         if not found:
             return f"binary not found: {binary}"
     if model.get("api_key_target_env"):
-        if model.get("api_key_env") and os.getenv(str(model["api_key_env"])):
-            return None
-        if os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY"):
-            return None
-        key_file = model.get("api_key_file")
-        if key_file and Path(str(key_file)).expanduser().exists():
+        if has_api_key_source(model):
             return None
         return f"missing API key source for {model['api_key_target_env']}"
     return None
 
 
 def truncate_output(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return "[omitted by zero-character limit]"
     if len(text) <= max_chars:
         return text
     head_chars = max_chars // 2
@@ -306,6 +314,172 @@ def knowledge_settings(run_settings: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(configured, dict):
         configured = {}
     return {**DEFAULT_KNOWLEDGE_TRANSFER, **configured}
+
+
+def truthy(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def safe_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-") or "model"
+
+
+def kimi_native_config(model: Dict[str, Any]) -> str:
+    alias = str(model.get("model") or "kimi-code/kimi-for-coding")
+    provider_model = str(model.get("provider_model") or alias.split("/")[-1] or "kimi-for-coding")
+    context_size = int(model.get("max_context_size", 262144))
+    deny_rules = "\n".join(
+        block(
+            f"""
+            [[permission.rules]]
+            decision = "deny"
+            pattern = "{tool}"
+            reason = "Codex Team Council Kimi worker runs as one read-only model; this tool is disabled for council mode."
+            """
+        )
+        for tool in KIMI_COUNCIL_DENY_TOOLS
+    )
+    return block(
+        f"""
+        default_model = "{alias}"
+        default_thinking = true
+        default_permission_mode = "auto"
+        default_plan_mode = false
+        merge_all_available_skills = false
+        telemetry = false
+
+        [providers."managed:kimi-code"]
+        type = "kimi"
+        api_key = ""
+        base_url = "https://api.kimi.com/coding/v1"
+
+        [providers."managed:kimi-code".oauth]
+        storage = "file"
+        key = "oauth/kimi-code"
+
+        [models."{alias}"]
+        provider = "managed:kimi-code"
+        model = "{provider_model}"
+        max_context_size = {context_size}
+        capabilities = [ "thinking", "always_thinking", "image_in", "video_in", "tool_use" ]
+        display_name = "K2.7 Code"
+
+        [services.moonshot_search]
+        base_url = "https://api.kimi.com/coding/v1/search"
+        api_key = ""
+
+        [services.moonshot_search.oauth]
+        storage = "file"
+        key = "oauth/kimi-code"
+
+        [services.moonshot_fetch]
+        base_url = "https://api.kimi.com/coding/v1/fetch"
+        api_key = ""
+
+        [services.moonshot_fetch.oauth]
+        storage = "file"
+        key = "oauth/kimi-code"
+
+        [loop_control]
+        max_retries_per_step = 2
+        reserved_context_size = 50000
+
+        [background]
+        max_running_tasks = 1
+        keep_alive_on_exit = false
+
+        {deny_rules}
+        """
+    ) + "\n"
+
+
+def prepare_kimi_code_home(model: Dict[str, Any], run_dir: Path, adapter_id: str) -> Path:
+    source_home = Path(os.environ.get("KIMI_CODE_HOME") or (Path.home() / ".kimi-code")).expanduser()
+    source_credentials = source_home / "credentials"
+    if not source_credentials.exists():
+        raise RuntimeError(f"Kimi credentials directory not found at {source_credentials}")
+
+    home = run_dir / "runtime" / "kimi-code-home" / safe_name(adapter_id)
+    home.mkdir(parents=True, exist_ok=True)
+    write_text(home / "config.toml", kimi_native_config(model))
+    (home / "empty-skills").mkdir(parents=True, exist_ok=True)
+
+    credentials_link = home / "credentials"
+    if credentials_link.exists() or credentials_link.is_symlink():
+        return home
+    os.symlink(source_credentials, credentials_link, target_is_directory=True)
+    return home
+
+
+def kimi_council_prompt(prompt: str) -> str:
+    return block(
+        """
+        Kimi council runtime policy for this invocation:
+        - You are exactly one floor worker in a larger council. Do not spawn or simulate an internal council.
+        - Do not call Agent or AgentSwarm. Subagents are disabled because they independently consume Kimi quota and duplicate the council architecture.
+        - Do not use Bash, WebSearch, FetchURL, Write, or Edit. This council pass is read-only and SOT-only.
+        - Use direct Read, Grep, and Glob tools when you need evidence from the declared Source of Truth.
+        - If you feel tempted to delegate, instead do the smallest targeted search yourself and report any uncertainty.
+        """
+    ) + "\n\n" + prompt
+
+
+def adapter_knowledge_settings(adapter: "Adapter", settings: Dict[str, Any], round_name: str) -> Dict[str, Any]:
+    selected = dict(settings)
+    prefix = "round2_" if round_name == "round2" else ""
+    if adapter.model.get(f"{prefix}pack_raw_excerpt_chars") is not None:
+        selected["pack_raw_excerpt_chars"] = int(adapter.model[f"{prefix}pack_raw_excerpt_chars"])
+    if adapter.model.get(f"{prefix}pack_max_chars") is not None:
+        selected["pack_max_chars"] = int(adapter.model[f"{prefix}pack_max_chars"])
+    return selected
+
+
+def build_round2_peer_pack(
+    adapter: "Adapter",
+    mission: str,
+    sot: Dict[str, Any],
+    first: Dict[str, Any],
+    round1_synthesis: str,
+    red_flags: List[str],
+    round1: List[Dict[str, Any]],
+    round1_capsules: Dict[str, Dict[str, Any]],
+    settings: Dict[str, Any],
+    persistent: bool,
+) -> str:
+    if not settings.get("route_peer_knowledge_to_round2", True):
+        return "Peer knowledge routing disabled for this run."
+
+    pack_settings = adapter_knowledge_settings(adapter, settings, "round2")
+    max_prompt_chars = int(adapter.model.get("max_prompt_chars") or 0)
+    if max_prompt_chars:
+        empty_prompt = adversarial_prompt(
+            mission,
+            sot,
+            first.get("output", ""),
+            round1_synthesis,
+            "[peer knowledge budget placeholder]",
+            red_flags,
+            persistent=persistent,
+        )
+        peer_budget = max_prompt_chars - len(empty_prompt) - 2048
+        if peer_budget < 4000:
+            return (
+                "Peer knowledge omitted for this adapter because its native prompt transport "
+                f"has a {max_prompt_chars}-character safety ceiling. Raw peer artifacts remain authoritative."
+            )
+        pack_settings["pack_max_chars"] = min(int(pack_settings.get("pack_max_chars", 320000)), peer_budget)
+
+    return build_knowledge_pack(
+        f"Round-one peer knowledge for {adapter.id}",
+        round1,
+        round1_capsules,
+        pack_settings,
+        exclude_id=adapter.id,
+    )
 
 
 def extract_footer(text: str, max_chars: int = 12000) -> str:
@@ -467,6 +641,14 @@ def extract_kimi_session_id(text: str) -> Optional[str]:
 
 
 def compact_failure_reason(proc: subprocess.CompletedProcess[str]) -> str:
+    error_pattern = re.compile(
+        r"(?i)\b(error|failed|rate[_ -]?limit|429|quota|usage limit|insufficient|unauthorized|forbidden|permission)\b"
+    )
+    for source in [proc.stderr or "", proc.stdout or ""]:
+        lines = [line.strip() for line in source.splitlines() if line.strip()]
+        for line in lines:
+            if error_pattern.search(line):
+                return line[:500]
     for source in [proc.stdout or "", proc.stderr or ""]:
         try:
             payload = json.loads(source)
@@ -486,20 +668,54 @@ def compact_failure_reason(proc: subprocess.CompletedProcess[str]) -> str:
     return f"exit {proc.returncode}"
 
 
+def api_key_env_names(model: Dict[str, Any]) -> List[str]:
+    names = []
+    primary = str(model.get("api_key_env") or "").strip()
+    if primary:
+        names.append(primary)
+    fallbacks = model.get("api_key_fallback_envs")
+    if fallbacks is None and (model.get("adapter") == "kimi-openai" or str(model.get("id", "")).startswith("kimi-")):
+        fallbacks = ["KIMI_API_KEY", "MOONSHOT_API_KEY"]
+    if isinstance(fallbacks, str):
+        names.extend(part.strip() for part in fallbacks.split(",") if part.strip())
+    elif isinstance(fallbacks, list):
+        names.extend(str(part).strip() for part in fallbacks if str(part).strip())
+    return list(dict.fromkeys(names))
+
+
+def has_api_key_source(model: Dict[str, Any]) -> bool:
+    for env_name in api_key_env_names(model):
+        if os.getenv(env_name):
+            return True
+    key_file = model.get("api_key_file")
+    return bool(key_file and Path(str(key_file)).expanduser().exists())
+
+
+def normalize_api_key_candidate(value: str) -> str:
+    candidate = value.strip()
+    if candidate.startswith("export "):
+        candidate = candidate[len("export "):].strip()
+    if "=" in candidate and not candidate.startswith(("sk-", "sk_")):
+        candidate = candidate.split("=", 1)[1].strip()
+    return candidate.strip().strip('"').strip("'")
+
+
 def load_api_key(model: Dict[str, Any]) -> str:
-    env_name = str(model.get("api_key_env") or "")
-    if env_name and os.getenv(env_name):
-        return str(os.environ[env_name]).strip()
-    for fallback in ["KIMI_API_KEY", "MOONSHOT_API_KEY"]:
-        if os.getenv(fallback):
-            return str(os.environ[fallback]).strip()
+    for env_name in api_key_env_names(model):
+        if os.getenv(env_name):
+            return str(os.environ[env_name]).strip()
     key_file = model.get("api_key_file")
     if key_file:
         text = Path(str(key_file)).expanduser().read_text(encoding="utf-8", errors="ignore")
-        match = re.search(r"(sk-[A-Za-z0-9_-]{16,})", text)
+        pattern = str(model.get("api_key_pattern") or r"(sk-[A-Za-z0-9_-]{16,})")
+        match = re.search(pattern, text)
         if match:
             return match.group(1).strip()
-    raise RuntimeError("missing Kimi API key")
+        for line in text.splitlines():
+            candidate = normalize_api_key_candidate(line)
+            if candidate and not candidate.startswith("#") and len(candidate) >= 16:
+                return candidate
+    raise RuntimeError("missing API key")
 
 
 def build_process_env(model: Dict[str, Any]) -> Optional[Dict[str, str]]:
@@ -560,6 +776,11 @@ def base_worker_prompt(mission: str, sot: Dict[str, Any], context_files: List[Tu
             "Treat READ ONLY literally: do not edit, create, delete, move, or format files.",
             "Do not run tests, builds, package managers, migrations, service restarts, deploys,",
             "network/web/browser tools, or any command that mutates repo, runtime, database, or live state.",
+            "",
+            "Research hygiene for large repos:",
+            "- Prefer targeted `rg`, focused `find`, and direct file reads over broad tree dumps.",
+            "- Avoid enumerating dependency, cache, build, virtualenv, coverage, or VCS internals unless directly relevant.",
+            "- If a search/listing returns a huge result set, narrow it before continuing instead of copying the whole thing into context.",
             "If your client exposes a sub-agent/delegation-only tool and it is enabled,",
             "you may use it only for internal critique of the provided context. The child",
             "must receive the same SOT and READ ONLY constraints.",
@@ -673,9 +894,14 @@ def adversarial_prompt(
 ) -> str:
     flags = "\n".join(f"- {flag}" for flag in red_flags) or "- none"
     session_note = (
-        "You are in the same model session as your first pass; use your prior context and the synthesis below."
+        "You are in the same model session as your first pass; use your prior context and the synthesis below. Your first answer is not replayed to avoid duplicating context."
         if persistent
         else "Your first answer is replayed below because this adapter does not support reliable session resume."
+    )
+    first_answer_section = (
+        "Your first answer is available in this persistent session. Re-check it from session context."
+        if persistent
+        else f"Your first answer:\n{first_answer}"
     )
     return block(
         f"""
@@ -696,6 +922,11 @@ def adversarial_prompt(
         - Attack the reasoning, not the author.
         - Look for false consensus, unsupported confidence, missing evidence, wrong-SOT assumptions, and claims that sound right but have no proof path.
         - Re-evaluate minority claims: either kill them with evidence or preserve them as possible uplift.
+        - Identify the single most consequential disagreement, uncertainty, or load-bearing claim that is checkable from the read-only Source of Truth.
+        - Run the smallest read-only SOT check that can settle or materially reduce uncertainty about that claim. Use only allowed read/list/grep/git inspection tools.
+        - Report the exact check, the raw result in brief, what it settles, what it does not settle, and how the result could still mislead.
+        - If no useful read-only SOT check is available, say why and name the smallest evidence that would be needed.
+        - Change your answer only when SOT evidence or a peer proof path warrants it, not because the synthesis sounds confident.
         - State clearly what changed in your view and why.
 
         Source of Truth remains unchanged:
@@ -710,8 +941,7 @@ def adversarial_prompt(
         Red flags:
         {flags}
 
-        Your first answer:
-        {first_answer}
+        {first_answer_section}
 
         Peer knowledge pack:
         These are recall aids from other workers, not authority. Use them to attack the synthesis,
@@ -724,6 +954,7 @@ def adversarial_prompt(
         Produce your revised answer freely in prose. End with:
         - what survived critique
         - what changed in your view
+        - the evidence check you ran, or why no useful check was possible
         - what still must be proven
         """
     ).strip()
@@ -761,6 +992,9 @@ def final_synthesis_prompt(
         - Prefer claims that survived adversarial review and have evidence or a concrete proof path.
         - Mark claims as proven, likely, plausible-but-unproven, or rejected only when that distinction changes what Codex should do next.
         - Preserve the most important minority insight if it still has a plausible path to being true.
+        - Before finalizing, audit yourself for dropped dissent, unsupported consensus, emergent claims no worker actually made, and minority insights that were smoothed away.
+        - If a final recommendation depends on an emergent synthesis claim, mark it unverified and give the proof path instead of presenting it as settled.
+        - If the audit changes the answer, surface that change under disagreements, verification, or remaining uncertainty. Do not add a ceremonial audit section when nothing material changed.
 
         Source of Truth:
         - Label: {sot['label']}
@@ -1041,20 +1275,74 @@ class KimiAdapter(Adapter):
 
     def run(self, prompt: str, round_name: str, session_id: Optional[str] = None) -> Dict[str, Any]:
         binary = os.path.expanduser(str(self.model["binary"]))
+        process_env = dict(os.environ)
+        configured_env = self.model.get("env") or {}
+        if not isinstance(configured_env, dict):
+            return failure_result(self, round_name, "model env must be an object")
+        for key, value in configured_env.items():
+            process_env[str(key)] = str(value)
+        process_env["KIMI_CODE_NO_AUTO_UPDATE"] = "1"
+        process_env["KIMI_DISABLE_TELEMETRY"] = "1"
+        process_env["KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT"] = "0"
+
+        skills_dir: Optional[Path] = None
+        if truthy(self.model.get("council_mode"), True):
+            try:
+                kimi_home = prepare_kimi_code_home(self.model, self.run_dir, self.id)
+            except Exception as exc:
+                return failure_result(self, round_name, f"Kimi council runtime setup failed: {exc}")
+            process_env["KIMI_CODE_HOME"] = str(kimi_home)
+            skills_dir = kimi_home / "empty-skills"
+            prompt = kimi_council_prompt(prompt)
+
+        max_prompt_chars = int(self.model.get("max_prompt_chars") or KIMI_NATIVE_ARG_MAX_CHARS)
+        if max_prompt_chars and len(prompt) > max_prompt_chars:
+            return failure_result(
+                self,
+                round_name,
+                f"Kimi prompt too large for native CLI -p single-argument transport ({len(prompt)} chars > {max_prompt_chars}); reduce adapter peer pack or use an API/ACP adapter.",
+            )
+
         args = [binary]
+        if self.model.get("auto", False):
+            args.append("--auto")
+        if self.model.get("yolo", False):
+            args.append("--yolo")
         if session_id:
             args.extend(["-r", session_id])
-        args.extend(["-m", str(self.model["model"]), "-p", prompt])
+        if skills_dir:
+            args.extend(["--skills-dir", str(skills_dir)])
+        args.extend(["-m", str(self.model["model"]), "-p", prompt, "--output-format", "stream-json"])
         started = time.time()
-        proc = run_cmd(args, cwd=Path(self.model.get("work_dir", "/tmp")))
-        output = (proc.stdout or "").strip()
+        proc = run_cmd(args, cwd=Path(self.model.get("work_dir", "/tmp")), env=process_env)
+        output_parts: List[str] = []
         seen_session = session_id
-        session_text = "\n".join(part for part in [proc.stdout or "", proc.stderr or ""] if part)
-        parsed_session = extract_kimi_session_id(session_text)
-        if parsed_session:
-            seen_session = parsed_session
-            output = re.sub(r"\n*To resume this session:.*$", "", output, flags=re.S).strip()
+        saw_tool_activity = False
+        for line in (proc.stdout or "").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("role") == "assistant" and event.get("content"):
+                output_parts.append(str(event["content"]))
+            if event.get("role") == "assistant" and event.get("tool_calls"):
+                saw_tool_activity = True
+            if event.get("role") == "tool":
+                saw_tool_activity = True
+            if event.get("session_id"):
+                seen_session = str(event["session_id"])
+        output = "\n".join(part.strip() for part in output_parts if part.strip()).strip()
+        if not output:
+            session_text = "\n".join(part for part in [proc.stdout or "", proc.stderr or ""] if part)
+            parsed_session = extract_kimi_session_id(session_text)
+            if parsed_session:
+                seen_session = parsed_session
+            if proc.returncode == 0 and not saw_tool_activity:
+                output = (proc.stdout or "").strip()
+                output = re.sub(r"\n*To resume this session:.*$", "", output, flags=re.S).strip()
         reason_override = compact_failure_reason(proc) if proc.returncode != 0 else None
+        if proc.returncode == 0 and not output and saw_tool_activity:
+            reason_override = "Kimi produced tool calls/tool results but no final assistant content"
         return self._record(round_name, proc, output, started, seen_session, args, reason_override=reason_override)
 
 
@@ -1066,14 +1354,22 @@ class ClaudeAdapter(Adapter):
         tools = self.model.get("tools", "Read,Grep,Glob,LS,Agent")
         args = [
             binary,
-            "-p",
-            "--model",
-            str(self.model["model"]),
-            "--effort",
-            str(self.model.get("effort", "max")),
-            "--output-format",
-            "json",
         ]
+        if self.model.get("safe_mode", False):
+            args.append("--safe-mode")
+        if self.model.get("bare", False):
+            args.append("--bare")
+        args.extend(
+            [
+                "-p",
+                "--model",
+                str(self.model["model"]),
+                "--effort",
+                str(self.model.get("effort", "max")),
+                "--output-format",
+                "json",
+            ]
+        )
         if self.model.get("no_chrome", True):
             args.append("--no-chrome")
         if tools is not None:
@@ -1677,20 +1973,23 @@ def main() -> int:
         round2_prompts: Dict[str, str] = {}
         for adapter in round2_adapters:
             first = ok_by_id[adapter.id]
-            session_id = first.get("session_id") if adapter.supports_resume else None
+            resume_enabled = truthy(adapter.model.get("round2_resume"), True)
+            session_id = first.get("session_id") if adapter.supports_resume and resume_enabled else None
             persistent = bool(session_id and adapter.supports_resume)
             if session_id:
                 session_by_id[adapter.id] = str(session_id)
-            if kt_settings.get("route_peer_knowledge_to_round2", True):
-                peer_knowledge_pack = build_knowledge_pack(
-                    f"Round-one peer knowledge for {adapter.id}",
-                    round1,
-                    round1_capsules,
-                    kt_settings,
-                    exclude_id=adapter.id,
-                )
-            else:
-                peer_knowledge_pack = "Peer knowledge routing disabled for this run."
+            peer_knowledge_pack = build_round2_peer_pack(
+                adapter,
+                mission,
+                sot,
+                first,
+                round1_synthesis,
+                red_flags,
+                round1,
+                round1_capsules,
+                kt_settings,
+                persistent,
+            )
             round2_prompts[adapter.id] = adversarial_prompt(
                 mission,
                 sot,
