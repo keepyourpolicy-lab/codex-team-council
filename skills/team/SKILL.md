@@ -109,7 +109,7 @@ To add Qwen, GLM, Gemini, or any new model, add a roster entry with an adapter, 
 Default routing is:
 
 - `deepseek-v4-pro`: `adapter: "opencode"`, `binary: "opencode"`, `model: "deepseek/deepseek-v4-pro"`. The DeepSeek key/provider setup belongs in opencode's normal configuration; the default worker does not read `DEEPSEEK_API_KEY` directly.
-- `kimi-k2-7`: `adapter: "kimi"`, `binary: "kimi"`, `model: "kimi-code/kimi-for-coding"`, with `council_mode: true`. This uses native Kimi Code CLI OAuth, isolates Kimi in a per-run `KIMI_CODE_HOME`, and denies subagents/mutation/web/bash tools for council runs.
+- `kimi-k2-7`: `adapter: "kimi-openai"`, `model: "kimi-k2.7-code-highspeed"`, `base_url: "https://api.moonshot.ai/v1"`, `api_key_env: "MOONSHOT_API_KEY"`, and `max_tokens: 32768`. This uses the official Moonshot OpenAI-compatible API path and preserves `reasoning_content` across resumed council turns.
 - `glm-5-2-max`: disabled by default. When enabled, it uses `adapter: "claude"` against Z.ai's Anthropic-compatible endpoint, maps `ZAI_API_KEY` to `ANTHROPIC_AUTH_TOKEN`, runs `effort: "high"`, and limits tools to `Read,Grep,Glob,LS`.
 - `opus-4-8-max`: `adapter: "claude"`, `binary: "claude"`, `model: "opus"`, `effort: "max"`. This requires Claude Code / Claude CLI installed and authenticated.
 - `gpt-5-5-xhigh`: `adapter: "codex"`, `binary: "codex"`, `model: "gpt-5.5"`, `reasoning_effort: "xhigh"`, `service_tier: "fast"`. This requires Codex CLI installed and authenticated.
@@ -119,11 +119,11 @@ The worker ids are local roster labels, not a guarantee that a provider uses the
 
 Kimi can run three ways:
 
+- Direct API, default for beta high-speed access: `adapter: "kimi-openai"` pointed at `https://api.moonshot.ai/v1` with `model: "kimi-k2.7-code-highspeed"`, streaming, and `max_tokens: 32768`.
 - Native Kimi Code CLI OAuth: `adapter: "kimi"` with `binary: "kimi"` and `model: "kimi-code/kimi-for-coding"`. This uses the local Kimi login instead of an API-key file. Keep `council_mode: true`: the runner creates an isolated per-run `KIMI_CODE_HOME`, reuses local OAuth credentials, disables loaded skill sprawl, denies `Agent`/`AgentSwarm`/mutation/web/bash tools, and routes a Kimi-safe second-pass peer pack so Kimi stays one council member instead of spawning its own quota-heavy mini-council.
-- Claude-wrapper fallback: `adapter: "claude"` pointed at Kimi Code's Anthropic-compatible endpoint with `ANTHROPIC_BASE_URL=https://api.kimi.com/coding/`, `model: "kimi-for-coding"`, and `CLAUDE_CODE_SUBAGENT_MODEL=kimi-for-coding`.
-- Direct API fallback: `adapter: "kimi-openai"` pointed at `https://api.kimi.com/coding/v1` with `model: "kimi-for-coding"`, streaming, and `max_tokens: 32768`. This may red-flag with Kimi Code's "client not on whitelist" error unless the client identity is allowlisted. Do not spoof User-Agent.
+- Claude-wrapper fallback: `adapter: "claude"` pointed at Moonshot's Anthropic-compatible endpoint with `ANTHROPIC_BASE_URL=https://api.moonshot.ai/anthropic`, `ANTHROPIC_AUTH_TOKEN` set from `MOONSHOT_API_KEY`, `model: "kimi-k2.7-code-highspeed"`, and `CLAUDE_CODE_SUBAGENT_MODEL=kimi-k2.7-code-highspeed`.
 
-For Kimi Open Platform keys, use the OpenAI-compatible direct API with `base_url: "https://api.moonshot.ai/v1"` and `model: "kimi-k2.7-code"`. Kimi K2.7 Code thinking is always on; do not pass a non-thinking mode. Preserve `reasoning_content` across resumed turns when using the direct adapter.
+For Kimi Open Platform keys, use the OpenAI-compatible direct API with `base_url: "https://api.moonshot.ai/v1"` and `model: "kimi-k2.7-code-highspeed"`. Official docs describe the high-speed variant as the same Kimi K2.7 Code model with identical thinking behavior. Kimi K2.7 Code thinking is always on; do not pass a non-thinking mode. Preserve `reasoning_content` across resumed turns when using the direct adapter.
 
 GLM-5.2 Coding Plan should run through an officially supported coding-tool path, not a raw SDK call. Preferred setup is `adapter: "claude"` pointed at Z.ai's Anthropic-compatible endpoint with `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic`, `api_key_target_env: "ANTHROPIC_AUTH_TOKEN"`, `model: "opus"`, and Claude model mapping env values `ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2[1m]`, `ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2[1m]`, and `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`. Keep the Z.ai key in `ZAI_API_KEY` or `~/.codex/team/zai_api_key`. For council runs, default GLM to `safe_mode: true`, `effort: "high"`, and `tools: "Read,Grep,Glob,LS"`: this still maps to GLM thinking mode, but avoids the quota-heavy Claude project-context load and `max` + `Agent` runaway path observed in repo-wide audits. Raise GLM to `max` only for a deliberate one-off run.
 
