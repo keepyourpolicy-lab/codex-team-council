@@ -940,10 +940,10 @@ class KimiOpenAIAdapter(Adapter):
         started = time.time()
         selected_session, messages = self._load_messages(session_id)
         request_messages = [*messages, {"role": "user", "content": prompt}]
-        base_url = str(self.model.get("base_url", "https://api.kimi.com/coding/v1")).rstrip("/")
+        base_url = str(self.model.get("base_url", "https://api.moonshot.ai/v1")).rstrip("/")
         endpoint = base_url + "/chat/completions"
         payload: Dict[str, Any] = {
-            "model": str(self.model.get("model", "kimi-for-coding")),
+            "model": str(self.model.get("model", "kimi-k2.7-code-highspeed")),
             "messages": request_messages,
             "stream": True,
         }
