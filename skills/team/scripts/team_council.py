@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import textwrap
 import time
@@ -36,8 +37,12 @@ except ImportError:  # pragma: no cover - POSIX fallback
 SKILL_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = SKILL_DIR / "references" / "roster.example.json"
 USER_CONFIG = Path.home() / ".codex" / "team" / "roster.json"
-DEFAULT_RUN_ROOT = Path("/tmp/team-council-runs")
-OPENCODE_LOCK_PATH = Path("/tmp/team-council-opencode.lock")
+def default_tmp_path(*parts: str) -> Path:
+    return Path(tempfile.gettempdir()).joinpath(*parts)
+
+
+DEFAULT_RUN_ROOT = default_tmp_path("team-council-runs")
+OPENCODE_LOCK_PATH = default_tmp_path("team-council-opencode.lock")
 OPENCODE_THREAD_LOCK = threading.Lock()
 DEFAULT_KNOWLEDGE_TRANSFER = {
     "capsules": True,
@@ -112,12 +117,17 @@ def run_cmd(
     input_text: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
 ) -> subprocess.CompletedProcess[str]:
+    process_env = dict(os.environ if env is None else env)
+    process_env.setdefault("PYTHONIOENCODING", "utf-8")
+    process_env.setdefault("PYTHONUTF8", "1")
     return subprocess.run(
         args,
         input=input_text,
         cwd=str(cwd),
-        env=env,
+        env=process_env,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout,
@@ -1112,7 +1122,7 @@ class OpenCodeAdapter(Adapter):
             "run",
             "--pure",
             "--dir",
-            str(Path(self.model.get("work_dir", "/tmp"))),
+            str(Path(self.model.get("work_dir") or tempfile.gettempdir())),
             "--model",
             str(self.model["model"]),
             "--format",
@@ -1123,7 +1133,7 @@ class OpenCodeAdapter(Adapter):
         if session_id:
             args.extend(["--session", session_id])
         started = time.time()
-        proc = run_opencode_cmd(args, cwd=Path(self.model.get("work_dir", "/tmp")), input_text=prompt)
+        proc = run_opencode_cmd(args, cwd=Path(self.model.get("work_dir") or tempfile.gettempdir()), input_text=prompt)
         texts: List[str] = []
         seen_session = session_id
         for line in (proc.stdout or "").splitlines():
@@ -1314,7 +1324,7 @@ class KimiAdapter(Adapter):
             args.extend(["--skills-dir", str(skills_dir)])
         args.extend(["-m", str(self.model["model"]), "-p", prompt, "--output-format", "stream-json"])
         started = time.time()
-        proc = run_cmd(args, cwd=Path(self.model.get("work_dir", "/tmp")), env=process_env)
+        proc = run_cmd(args, cwd=Path(self.model.get("work_dir") or tempfile.gettempdir()), env=process_env)
         output_parts: List[str] = []
         seen_session = session_id
         saw_tool_activity = False
@@ -1383,7 +1393,7 @@ class ClaudeAdapter(Adapter):
         started = time.time()
         proc = run_cmd(
             args,
-            cwd=Path(self.model.get("work_dir", "/tmp")),
+            cwd=Path(self.model.get("work_dir") or tempfile.gettempdir()),
             input_text=prompt,
             env=process_env,
         )
@@ -1436,11 +1446,11 @@ class CodexAdapter(Adapter):
                 "--sandbox",
                 "read-only",
                 "-C",
-                str(Path(self.model.get("work_dir", "/tmp"))),
+                str(Path(self.model.get("work_dir") or tempfile.gettempdir())),
                 "-",
             ]
         started = time.time()
-        proc = run_cmd(args, cwd=Path(self.model.get("work_dir", "/tmp")), input_text=prompt)
+        proc = run_cmd(args, cwd=Path(self.model.get("work_dir") or tempfile.gettempdir()), input_text=prompt)
         output = last_message.read_text(encoding="utf-8").strip() if last_message.exists() else (proc.stdout or "").strip()
         seen_session = session_id
         for line in (proc.stdout or "").splitlines():
