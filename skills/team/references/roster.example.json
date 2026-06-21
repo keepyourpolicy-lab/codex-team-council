@@ -28,13 +28,11 @@
     {
       "id": "kimi-k2-7",
       "enabled": true,
-      "adapter": "kimi",
-      "binary": "kimi",
-      "model": "kimi-code/kimi-for-coding",
-      "council_mode": true,
-      "max_prompt_chars": 120000,
-      "round2_pack_raw_excerpt_chars": 0,
-      "round2_pack_max_chars": 60000
+      "adapter": "kimi-openai",
+      "model": "kimi-k2.7-code-highspeed",
+      "base_url": "https://api.moonshot.ai/v1",
+      "api_key_env": "MOONSHOT_API_KEY",
+      "max_tokens": 32768
     },
     {
       "id": "glm-5-2-max",

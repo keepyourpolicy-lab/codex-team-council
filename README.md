@@ -88,7 +88,7 @@ The bundled roster is intentionally explicit about how each model is reached. Th
 Default workers:
 
 - `deepseek-v4-pro`: runs through the `opencode` CLI with model `deepseek/deepseek-v4-pro`. Install and authenticate `opencode`, then configure your DeepSeek provider/key in `opencode`'s normal provider config. This plugin does not read `DEEPSEEK_API_KEY` directly for the default DeepSeek worker.
-- `kimi-k2-7`: runs through the native `kimi` CLI with model `kimi-code/kimi-for-coding` and `council_mode: true`. Install and log in to Kimi Code CLI; the runner reuses local OAuth credentials while isolating Kimi in a per-run `KIMI_CODE_HOME` and denying subagents/mutation/web/bash tools.
+- `kimi-k2-7`: runs through the direct Moonshot/OpenAI-compatible API route with model `kimi-k2.7-code-highspeed`. Set `MOONSHOT_API_KEY` locally; this uses `https://api.moonshot.ai/v1` and preserves Kimi K2.7 reasoning content across resumed council turns.
 - `glm-5-2-max`: disabled by default. When enabled, it runs through the `claude` CLI against Z.ai's Anthropic-compatible endpoint, maps `ZAI_API_KEY` to `ANTHROPIC_AUTH_TOKEN`, uses `effort: "high"`, and limits tools to `Read,Grep,Glob,LS`.
 - `opus-4-8-max`: runs through the `claude` CLI with local worker id `opus-4-8-max`, model `opus`, and effort `max`. Install and log in to Claude Code / Claude CLI before enabling this worker.
 - `gpt-5-5-xhigh`: runs through the `codex` CLI with model `gpt-5.5`, reasoning effort `xhigh`, and service tier `fast`. Install and log in to the Codex CLI before enabling this worker.
@@ -112,7 +112,7 @@ Preferred options:
 Practical defaults:
 
 - DeepSeek credentials belong in your `opencode` setup for the default `deepseek-v4-pro` worker.
-- Kimi credentials should be supplied as `KIMI_API_KEY`, unless you edit the roster to use an `api_key_file`.
+- Kimi credentials should be supplied as `MOONSHOT_API_KEY` for the default high-speed K2.7 route, unless you edit the roster to use `KIMI_API_KEY` or an `api_key_file`.
 - Claude credentials belong in your `claude` CLI login for the default Opus worker.
 - OpenAI/Codex credentials belong in your `codex` CLI login for the default GPT/Codex worker and synthesizer.
 

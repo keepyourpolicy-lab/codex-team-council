@@ -7,6 +7,8 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
+import importlib.util
 from pathlib import Path
 
 
@@ -56,10 +58,55 @@ def check_python() -> None:
     json.loads((REPO_ROOT / "skills" / "team" / "references" / "roster.example.json").read_text(encoding="utf-8"))
 
 
+def check_runner_runtime_defaults() -> None:
+    runner = REPO_ROOT / "skills" / "team" / "scripts" / "team_council.py"
+    spec = importlib.util.spec_from_file_location("team_council_self_check", runner)
+    if spec is None or spec.loader is None:
+        fail("could not load team_council.py for runtime checks")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    run_root = module.DEFAULT_RUN_ROOT
+    if not run_root.is_absolute():
+        fail(f"DEFAULT_RUN_ROOT must be absolute: {run_root}")
+    if str(run_root).startswith("\\tmp"):
+        fail(f"DEFAULT_RUN_ROOT uses a Unix-style Windows root: {run_root}")
+
+    probe = "arrow \u2192 snowman \u2603"
+    proc = module.run_cmd(
+        [
+            sys.executable,
+            "-c",
+            "import sys; data=sys.stdin.read(); print(data.encode('unicode_escape').decode('ascii'))",
+        ],
+        cwd=Path(tempfile.gettempdir()),
+        input_text=probe,
+    )
+    if proc.returncode != 0:
+        fail(f"UTF-8 subprocess probe failed: {proc.stderr.strip()}")
+    if "\\u2192" not in proc.stdout or "\\u2603" not in proc.stdout:
+        fail(f"UTF-8 subprocess probe lost unicode characters: {proc.stdout!r}")
+
+    multi_key_env = "\n".join(
+        [
+            "ANTHROPIC_API_KEY=anthropic-wrong-value-for-kimi",
+            "MOONSHOT_API_KEY=moonshot-right-value",
+            "ZAI_API_KEY=zai-right-value",
+        ]
+    )
+    moonshot = module.load_named_api_key_from_env_text(multi_key_env, ["MOONSHOT_API_KEY"])
+    zai = module.load_named_api_key_from_env_text(multi_key_env, ["ZAI_API_KEY"])
+    if moonshot != "moonshot-right-value":
+        fail("env-file parser did not select MOONSHOT_API_KEY by name")
+    if zai != "zai-right-value":
+        fail("env-file parser did not select ZAI_API_KEY by name")
+
+
 def main() -> int:
     check_manifest()
     check_no_local_leaks()
     check_python()
+    check_runner_runtime_defaults()
     print("self check passed")
     return 0
 
