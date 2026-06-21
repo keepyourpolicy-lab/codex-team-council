@@ -87,6 +87,20 @@ def check_runner_runtime_defaults() -> None:
     if "\\u2192" not in proc.stdout or "\\u2603" not in proc.stdout:
         fail(f"UTF-8 subprocess probe lost unicode characters: {proc.stdout!r}")
 
+    multi_key_env = "\n".join(
+        [
+            "ANTHROPIC_API_KEY=anthropic-wrong-value-for-kimi",
+            "MOONSHOT_API_KEY=moonshot-right-value",
+            "ZAI_API_KEY=zai-right-value",
+        ]
+    )
+    moonshot = module.load_named_api_key_from_env_text(multi_key_env, ["MOONSHOT_API_KEY"])
+    zai = module.load_named_api_key_from_env_text(multi_key_env, ["ZAI_API_KEY"])
+    if moonshot != "moonshot-right-value":
+        fail("env-file parser did not select MOONSHOT_API_KEY by name")
+    if zai != "zai-right-value":
+        fail("env-file parser did not select ZAI_API_KEY by name")
+
 
 def main() -> int:
     check_manifest()

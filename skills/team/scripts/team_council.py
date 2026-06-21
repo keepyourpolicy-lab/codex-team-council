@@ -710,13 +710,36 @@ def normalize_api_key_candidate(value: str) -> str:
     return candidate.strip().strip('"').strip("'")
 
 
+def load_named_api_key_from_env_text(text: str, env_names: List[str]) -> Optional[str]:
+    wanted = set(env_names)
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[len("export "):].strip()
+        if "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key.strip() not in wanted:
+            continue
+        candidate = normalize_api_key_candidate(value)
+        if candidate:
+            return candidate
+    return None
+
+
 def load_api_key(model: Dict[str, Any]) -> str:
-    for env_name in api_key_env_names(model):
+    env_names = api_key_env_names(model)
+    for env_name in env_names:
         if os.getenv(env_name):
             return str(os.environ[env_name]).strip()
     key_file = model.get("api_key_file")
     if key_file:
         text = Path(str(key_file)).expanduser().read_text(encoding="utf-8", errors="ignore")
+        named_key = load_named_api_key_from_env_text(text, env_names)
+        if named_key:
+            return named_key
         pattern = str(model.get("api_key_pattern") or r"(sk-[A-Za-z0-9_-]{16,})")
         match = re.search(pattern, text)
         if match:
